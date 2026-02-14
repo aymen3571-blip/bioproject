@@ -42,7 +42,7 @@ jobs:
 
       # 4. Run the Scraper
       - name: Run Scraper
-        run: python dropdax_scraper.py
+        run: python Bio_scraper.py
 
       # 5. Commit and Push Results
       - name: Commit and Push
