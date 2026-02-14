@@ -2,9 +2,8 @@ name: DropDax NameBio Scraper
 
 on:
   schedule:
-    # Runs at 12:00 UTC every day
     - cron: '0 12 * * *'
-  workflow_dispatch: # Allows manual run button
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,30 +21,33 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install System Dependencies (Tesseract OCR)
       - name: Install Tesseract OCR (System)
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
 
-      # 2. Install Python Libraries
       - name: Install Python Dependencies
         run: |
           pip install playwright pytesseract pillow
           playwright install chromium
 
-      # 3. Create Cookie File from Secrets
-      # We take the secret text and save it to the .json file the script expects
+      # Decode the secret into the JSON file
       - name: Create Session File
-        run: |
-          echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
+        run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
-      # 4. Run the Scraper
       - name: Run Scraper
         run: python Bio_scraper.py
 
-      # 5. Commit and Push Results
+      # NEW: This step uploads the screenshots if they exist
+      - name: Upload Debug Screenshots
+        if: always() # Run this even if the scraper fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: "*.png"
+
       - name: Commit and Push
+        if: success() # Only push if scraper worked
         run: |
           git config --global user.name "DropDax Bot"
           git config --global user.email "bot@dropdax.com"
