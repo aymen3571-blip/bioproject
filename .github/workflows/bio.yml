@@ -1,0 +1,54 @@
+name: DropDax NameBio Scraper
+
+on:
+  schedule:
+    # Runs at 12:00 UTC every day
+    - cron: '0 12 * * *'
+  workflow_dispatch: # Allows manual run button
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 1. Install System Dependencies (Tesseract OCR)
+      - name: Install Tesseract OCR (System)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+
+      # 2. Install Python Libraries
+      - name: Install Python Dependencies
+        run: |
+          pip install playwright pytesseract pillow
+          playwright install chromium
+
+      # 3. Create Cookie File from Secrets
+      # We take the secret text and save it to the .json file the script expects
+      - name: Create Session File
+        run: |
+          echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
+
+      # 4. Run the Scraper
+      - name: Run Scraper
+        run: python dropdax_scraper.py
+
+      # 5. Commit and Push Results
+      - name: Commit and Push
+        run: |
+          git config --global user.name "DropDax Bot"
+          git config --global user.email "bot@dropdax.com"
+          git add namebio_data.csv
+          git commit -m "Update NameBio Data [$(date)]" || echo "No changes to commit"
+          git push
