@@ -125,98 +125,73 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS (RADAR MODE) ---
+# --- ENHANCED CLOUDFLARE BYPASS (INFINITE HUNTER MODE) ---
 def bypass_challenge(page, is_round_2=False):
     print(f">> CHECKING FOR CLOUDFLARE CHALLENGE (Round 2: {is_round_2})...")
     
     # 0. WAIT FOR LOAD (Crucial for Round 2)
-    # If we just redirected, the widget might not be ready yet.
     time.sleep(5)
     
-    # 1. RADAR SCAN: Look for the frame for up to 15 seconds
-    turnstile_frame = None
-    print(">> Scanning for Turnstile Widget...")
+    # Check if we are even on a challenge page
+    title = page.title().lower()
+    if "robot" not in title and "moment" not in title and "attention" not in title:
+        print(">> No challenge detected (Clean entry).")
+        return True
+
+    # START THE HUNTER LOOP (Max 60 seconds)
+    print(">> Starting Hunter Loop (60s)...")
     
-    for i in range(15): # Loop 15 times (15 seconds)
+    for i in range(60):
+        # 1. CHECK SUCCESS (Did we get through?)
+        if "robot" not in page.title().lower():
+            print(">> SUCCESS! Challenge passed.")
+            return True
+        
+        # 2. SCAN FOR WIDGET
+        turnstile_frame = None
         for frame in page.frames:
             if "cloudflare" in frame.url or "turnstile" in frame.url:
                 turnstile_frame = frame
                 break
         
+        # 3. CLICK IF FOUND
         if turnstile_frame:
-            print(f">> Turnstile Widget FOUND on attempt {i+1}!")
-            break
-            
-        time.sleep(1) # Wait 1 second before looking again
-
-    # 2. CLICK LOGIC
-    if turnstile_frame:
-        print(">> Clicking Turnstile Widget...")
-        try:
-            time.sleep(1) # Settle
-            box = turnstile_frame.frame_element().bounding_box()
-            if box:
-                # Geometry Click (Most Reliable)
-                click_x = box['x'] + (box['width'] / 2)
-                click_y = box['y'] + (box['height'] / 2)
-                
-                # Move mouse there slowly
-                page.mouse.move(click_x, click_y, steps=20)
-                time.sleep(0.5)
-                page.mouse.click(click_x, click_y)
-            else:
-                # Fallback
-                turnstile_frame.click("body", force=True)
-        except Exception as e:
-            print(f">> Click error: {e}")
-    else:
-        print(">> Turnstile Widget NOT found after scan.")
-
-    # 3. WAIT AND MONITOR (Active Waiting)
-    print(">> Waiting for reaction (30s)...")
-    for i in range(30):
-        if "robot" not in page.title().lower():
-            print(">> SUCCESS! Challenge passed.")
-            return True
+            try:
+                box = turnstile_frame.frame_element().bounding_box()
+                if box:
+                    # Log finding only once to avoid spam
+                    if i % 10 == 0: print(f">> Widget detected. Clicking... ({i}s)")
+                    
+                    click_x = box['x'] + (box['width'] / 2)
+                    click_y = box['y'] + (box['height'] / 2)
+                    page.mouse.move(click_x, click_y, steps=5)
+                    page.mouse.click(click_x, click_y)
+                else:
+                    turnstile_frame.click("body", force=True)
+            except:
+                pass
         
-        # Wiggle mouse AND scroll to simulate reading (New)
-        if i % 3 == 0: 
-            human_mouse_move(page)
-            page.mouse.wheel(0, random.randint(100, 500)) # Scroll down
-            time.sleep(0.5)
-            page.mouse.wheel(0, random.randint(-500, -100)) # Scroll up
-            
-        time.sleep(1)
+        # 4. EMERGENCY EXIT (ROUND 1 ONLY)
+        # Only try Member Login if we are NOT in Round 2 (to avoid loops)
+        if not is_round_2 and i > 20 and i % 5 == 0:
+            try:
+                login_link = page.get_by_text("Member Login")
+                if login_link.count() > 0:
+                    print(">> Taking Emergency Exit (Member Login)...")
+                    login_link.click()
+                    return True # Let the main loop handle the redirect
+            except:
+                pass
 
-    # 4. EMERGENCY EXIT LOGIC
-    if not is_round_2:
-        # ROUND 1: Try Member Login
-        print(">> STUCK! Attempting 'Member Login' bypass...")
-        try:
-            login_link = page.get_by_text("Member Login")
-            if login_link.count() > 0:
-                login_link.click()
-                print(">> Clicked 'Member Login'. Waiting for redirect...")
-                page.wait_for_load_state("domcontentloaded", timeout=30000)
-                time.sleep(5)
-                if "login" not in page.url and "robot" not in page.title().lower():
-                     print(">> SUCCESS! Login link bypassed the block.")
-                     return True
-        except:
-            pass
-    else:
-        # ROUND 2: Do NOT click Member Login (Avoids Loop).
-        # We try to access the Search Param directly as a last resort.
-        print(">> Round 2 Stuck. Trying direct Search param injection...")
-        try:
-            page.goto("https://namebio.com/?s=rescue", timeout=30000, wait_until="domcontentloaded")
-            time.sleep(5)
-        except:
-            pass
+        # 5. ALIVE SIGNAL
+        if i % 5 == 0: 
+            human_mouse_move(page)
+        
+        time.sleep(1)
 
     # Final check
     if "robot" in page.title().lower():
-        print(">> FAILED: Still blocked.")
+        print(">> FAILED: Still blocked after 60s.")
         return False
         
     return True
@@ -244,7 +219,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Stepping Stone Fix)...")
+    print(">> Starting DropDax Proxy Scraper (Infinite Hunter Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -300,9 +275,9 @@ def main():
             bypass_success = bypass_challenge(page, is_round_2=False)
             if not bypass_success:
                 page.screenshot(path="debug_block_round1.png", animations="disabled")
-                raise Exception("Cloudflare blocked access (Round 1).")
-
-            # 3. DASHBOARD REDIRECT LOGIC (STEPPING STONE)
+                # Don't crash yet, sometimes we are through even if title is stuck
+            
+            # 3. DASHBOARD REDIRECT LOGIC
             # If we bypassed by clicking "Member Login", we end up on /account
             print(f">> Current URL: {page.url}")
             
@@ -315,9 +290,9 @@ def main():
                     print(">> Step 1: Visiting Trends...")
                     page.get_by_text("Trends").first.click()
                     page.wait_for_load_state("domcontentloaded")
-                    time.sleep(3)
+                    time.sleep(5)
                 except:
-                    print(">> Trends link failed. Trying direct navigation...")
+                    print(">> Trends link failed.")
                 
                 # STEP 2: Now go to Home via Logo (Looks natural from Trends)
                 print(">> Step 2: Clicking Logo to return Home...")
@@ -326,19 +301,21 @@ def main():
                     if logo.count() > 0:
                         logo.click()
                     else:
-                        # Fallback: Use Search Param to trick Cloudflare
-                        page.goto("https://namebio.com/?s=", timeout=60000, wait_until="domcontentloaded")
+                        page.goto("https://namebio.com/?s=", timeout=90000, wait_until="domcontentloaded")
                 except:
-                     page.goto("https://namebio.com/?s=", timeout=60000, wait_until="domcontentloaded")
+                     page.goto("https://namebio.com/?s=", timeout=90000, wait_until="domcontentloaded")
 
                 time.sleep(5)
                 print(f">> New URL after redirect: {page.url}")
                 
                 # 4. HANDLE CLOUDFLARE (ROUND 2)
+                # If we are stuck on Captcha again, Run the Hunter Loop
                 if "captcha" in page.url or "robot" in page.title().lower():
                     print(">> Redirect triggered Cloudflare. Running Round 2 Bypass...")
                     bypass_success_2 = bypass_challenge(page, is_round_2=True)
+                    
                     if not bypass_success_2:
+                         # Final Hail Mary: Check if filters exist anyway
                          if page.locator("button[data-id='extension']").count() > 0:
                             print(">> Filters detected despite spinner. Proceeding...")
                          else:
