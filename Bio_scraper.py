@@ -172,14 +172,20 @@ def bypass_challenge(page, is_round_2=False):
     else:
         print(">> Turnstile Widget NOT found after scan.")
 
-    # 3. WAIT AND MONITOR
-    print(">> Waiting for reaction (25s)...")
-    for i in range(25):
+    # 3. WAIT AND MONITOR (Active Waiting)
+    print(">> Waiting for reaction (30s)...")
+    for i in range(30):
         if "robot" not in page.title().lower():
             print(">> SUCCESS! Challenge passed.")
             return True
-        # Wiggle mouse periodically to stay "alive"
-        if i % 5 == 0: human_mouse_move(page)
+        
+        # Wiggle mouse AND scroll to simulate reading (New)
+        if i % 3 == 0: 
+            human_mouse_move(page)
+            page.mouse.wheel(0, random.randint(100, 500)) # Scroll down
+            time.sleep(0.5)
+            page.mouse.wheel(0, random.randint(-500, -100)) # Scroll up
+            
         time.sleep(1)
 
     # 4. EMERGENCY EXIT LOGIC
@@ -199,10 +205,11 @@ def bypass_challenge(page, is_round_2=False):
         except:
             pass
     else:
-        # ROUND 2: Do NOT click Member Login (Avoids Loop). Try Force Reload.
-        print(">> Round 2 Stuck. Attempting Force Reload...")
+        # ROUND 2: Do NOT click Member Login (Avoids Loop).
+        # We try to access the Search Param directly as a last resort.
+        print(">> Round 2 Stuck. Trying direct Search param injection...")
         try:
-            page.reload(timeout=30000)
+            page.goto("https://namebio.com/?s=rescue", timeout=30000, wait_until="domcontentloaded")
             time.sleep(5)
         except:
             pass
@@ -237,7 +244,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Final Loop Fix)...")
+    print(">> Starting DropDax Proxy Scraper (Stepping Stone Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -290,45 +297,51 @@ def main():
                 raise Exception("Failed to connect to NameBio.")
             
             # 2. HANDLE CLOUDFLARE (ROUND 1)
-            # Pass is_round_2=False because this is our first attempt
             bypass_success = bypass_challenge(page, is_round_2=False)
             if not bypass_success:
                 page.screenshot(path="debug_block_round1.png", animations="disabled")
                 raise Exception("Cloudflare blocked access (Round 1).")
 
-            # 3. DASHBOARD REDIRECT LOGIC
+            # 3. DASHBOARD REDIRECT LOGIC (STEPPING STONE)
             # If we bypassed by clicking "Member Login", we end up on /account
-            # We must go back to the home page to search.
             print(f">> Current URL: {page.url}")
             
-            # Catch ANY sub-page that isn't the home search
             bad_paths = ["/account", "dashboard", "memberships", "login"]
             if any(path in page.url for path in bad_paths):
-                print(">> Landed on Account/Sub-Page. Redirecting to Home for search...")
+                print(">> Landed on Dashboard. Using Stepping Stone Navigation...")
                 
+                # STEP 1: Go to "Trends" first (Neutral Page)
                 try:
-                    # UPDATED: Use 'referer' to make it look like a natural click back to home
-                    current_url = page.url
-                    page.goto("https://namebio.com/", referer=current_url, timeout=60000, wait_until="domcontentloaded")
+                    print(">> Step 1: Visiting Trends...")
+                    page.get_by_text("Trends").first.click()
+                    page.wait_for_load_state("domcontentloaded")
+                    time.sleep(3)
                 except:
-                     pass
+                    print(">> Trends link failed. Trying direct navigation...")
+                
+                # STEP 2: Now go to Home via Logo (Looks natural from Trends)
+                print(">> Step 2: Clicking Logo to return Home...")
+                try:
+                    logo = page.locator(".navbar-brand")
+                    if logo.count() > 0:
+                        logo.click()
+                    else:
+                        # Fallback: Use Search Param to trick Cloudflare
+                        page.goto("https://namebio.com/?s=", timeout=60000, wait_until="domcontentloaded")
+                except:
+                     page.goto("https://namebio.com/?s=", timeout=60000, wait_until="domcontentloaded")
 
                 time.sleep(5)
                 print(f">> New URL after redirect: {page.url}")
                 
-                # 4. HANDLE CLOUDFLARE (ROUND 2 - CRITICAL)
-                # If we were sent to /captcha, we must solve it.
+                # 4. HANDLE CLOUDFLARE (ROUND 2)
                 if "captcha" in page.url or "robot" in page.title().lower():
                     print(">> Redirect triggered Cloudflare. Running Round 2 Bypass...")
-                    
-                    # We pass is_round_2=True to DISABLE the "Member Login" loop
                     bypass_success_2 = bypass_challenge(page, is_round_2=True)
-                    
                     if not bypass_success_2:
-                        # Final check: sometimes title says Robot but we are actually through
-                        if page.locator("button[data-id='extension']").count() > 0:
+                         if page.locator("button[data-id='extension']").count() > 0:
                             print(">> Filters detected despite spinner. Proceeding...")
-                        else:
+                         else:
                             page.screenshot(path="debug_block_round2.png", animations="disabled")
                             raise Exception("Cloudflare blocked access (Round 2).")
 
