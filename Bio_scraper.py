@@ -20,21 +20,75 @@ MAX_RETRIES = 3
 
 # --- ADVANCED NATIVE STEALTH ---
 def apply_advanced_stealth(page):
+    """
+    Injects specific JavaScript overrides to mask the bot.
+    Includes WebGL spoofing which is crucial for Cloudflare.
+    """
+    
+    # 1. Mask the WebDriver flag (The #1 detection method)
     page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+    """)
+
+    # 2. Mock the Chrome Object (So it looks like Google Chrome, not a script)
+    page.add_init_script("""
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+    """)
+
+    # 3. Spoof WebGL Vendor (CRITICAL FOR CLOUDFLARE)
+    # Headless browsers usually show "Google SwiftShader" which is a dead giveaway.
+    # We force it to say "Intel Iris OpenGL" to look like a real laptop.
+    page.add_init_script("""
         const getParameter = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+            // 37445 = UNMASKED_VENDOR_WEBGL
+            if (parameter === 37445) {
+                return 'Intel Inc.';
+            }
+            // 37446 = UNMASKED_RENDERER_WEBGL
+            if (parameter === 37446) {
+                return 'Intel(R) Iris(TM) Plus Graphics 640';
+            }
             return getParameter(parameter);
         };
     """)
 
+    # 4. Mock Plugins (Bots have 0 plugins, Humans have PDF viewers etc)
+    page.add_init_script("""
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+    """)
+
+    # 5. Fix Window Dimensions (Headless windows sometimes report 0)
+    page.add_init_script("""
+        Object.defineProperty(window, 'outerWidth', { value: window.innerWidth });
+        Object.defineProperty(window, 'outerHeight', { value: window.innerHeight });
+    """)
+
+    # 6. Mask Permissions
+    page.add_init_script("""
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            originalQuery(parameters)
+        );
+    """)
+
 def human_mouse_move(page):
     try:
+        # Move mouse to random positions to simulate human 'hesitation'
         for _ in range(random.randint(2, 4)):
             x = random.randint(100, 1000)
             y = random.randint(100, 800)
@@ -63,16 +117,18 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS ---
+# --- ENHANCED CLOUDFLARE BYPASS (THE EMERGENCY EXIT) ---
 def bypass_challenge(page):
     print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
     time.sleep(5)
     
+    # Check if we are even on a challenge page
     title = page.title().lower()
     if "robot" not in title and "moment" not in title and "attention" not in title:
         print(">> No challenge detected (Clean entry).")
         return True
 
+    # 1. TRY TO CLICK THE TURNSTILE WIDGET
     turnstile_frame = None
     for frame in page.frames:
         if "cloudflare" in frame.url or "turnstile" in frame.url:
@@ -82,20 +138,27 @@ def bypass_challenge(page):
     if turnstile_frame:
         print(">> Turnstile Widget found. Clicking...")
         try:
+            # METHOD A: Geometry Click (Most Reliable)
+            # We find where the frame is on the screen and click the exact center
             box = turnstile_frame.frame_element().bounding_box()
             if box:
+                # Calculate center of the widget
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
+                
+                # Move mouse there slowly
                 page.mouse.move(click_x, click_y, steps=20)
                 time.sleep(0.5)
                 page.mouse.click(click_x, click_y)
             else:
+                # METHOD B: Selector Click (Fallback)
                 turnstile_frame.click("body", force=True)
         except:
             pass
     else:
-        print(">> Turnstile Widget NOT found.")
+        print(">> Turnstile Widget NOT found (Invisible/Missing).")
 
+    # 2. WAIT AND MONITOR
     print(">> Waiting for reaction (20s)...")
     for i in range(20):
         if "robot" not in page.title().lower():
@@ -103,20 +166,28 @@ def bypass_challenge(page):
             return True
         time.sleep(1)
 
+    # 3. EMERGENCY EXIT: CLICK "MEMBER LOGIN"
+    # If we are stuck, clicking this link often refreshes the session successfully.
     print(">> STUCK! Attempting 'Member Login' bypass...")
     try:
+        # Try different selectors for the link
         login_link = page.get_by_text("Member Login")
         if login_link.count() > 0:
             login_link.click()
             print(">> Clicked 'Member Login'. Waiting for redirect...")
+            
+            # Wait for navigation
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             time.sleep(5)
+            
+            # If we are redirected to Dashboard or Home, we win.
             if "login" not in page.url and "robot" not in page.title().lower():
                  print(">> SUCCESS! Login link bypassed the block.")
                  return True
     except Exception as e:
         print(f">> Login bypass failed: {e}")
 
+    # Final check
     if "robot" in page.title().lower():
         print(">> FAILED: Still blocked.")
         return False
@@ -127,14 +198,21 @@ def connect_with_retries(page, url, retries=3):
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
+            # Use 'domcontentloaded' to return faster
             page.goto(url, timeout=90000, wait_until="domcontentloaded") 
-            if "chrome-error" in page.url: raise Exception("Proxy Error")
+            
+            # Check for immediate chrome error (proxy failure)
+            if "chrome-error" in page.url:
+                raise Exception("Proxy dropped connection (Chrome Error).")
+
             time.sleep(5)
             return True
         except Exception as e:
             print(f">> Attempt {attempt} failed: {e}")
-            if attempt < retries: time.sleep(10)
-            else: return False
+            if attempt < retries:
+                time.sleep(10)
+            else:
+                return False
     return False
 
 def main():
@@ -166,6 +244,7 @@ def main():
             }
             print(f">> Proxy Configured: {parsed.hostname}:{parsed.port}")
         except:
+             print(">> WARNING: Could not parse proxy URL. Using raw string.")
              launch_options["proxy"] = {"server": proxy_url}
 
     with sync_playwright() as p:
@@ -179,6 +258,8 @@ def main():
         
         try:
             page = context.new_page()
+            
+            # APPLY THE ADVANCED STEALTH
             apply_advanced_stealth(page)
 
             # 1. LOGIN & CONNECT
@@ -191,21 +272,30 @@ def main():
             bypass_success = bypass_challenge(page)
             if not bypass_success:
                 page.screenshot(path="debug_block_final.png", animations="disabled")
-                raise Exception("Cloudflare blocked access.")
+                raise Exception("Cloudflare blocked access (Challenge not solved).")
 
-            # 3. NEW: DASHBOARD REDIRECT LOGIC
-            # If we bypassed by clicking "Member Login", we are now on the dashboard.
+            # 3. NEW: DASHBOARD REDIRECT LOGIC (FIXED)
+            # If we bypassed by clicking "Member Login", we end up on /account
             # We must go back to the home page to search.
             print(f">> Current URL: {page.url}")
-            if "dashboard" in page.url or "member" in page.url or "my-account" in page.url:
-                print(">> Landed on Dashboard. Redirecting to Home for search...")
+            
+            # NEW: Explicitly check for '/account'
+            if "/account" in page.url or "dashboard" in page.url:
+                print(">> Landed on Account Page. Redirecting to Home for search...")
+                
+                # Force navigation back to home
                 page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
                 time.sleep(5)
+                
+                # Double check we made it back
+                print(f">> New URL after redirect: {page.url}")
             
             # 4. HANDLE BANNER
             try:
+                # Look for the banner more aggressively
                 if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
                     print(">> Banner detected. Waiting...")
+                    # Wait for close button
                     page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
                     print(">> Banner closed.")
             except:
@@ -214,9 +304,10 @@ def main():
             # 5. APPLY FILTERS
             print(">> Applying filters...")
             try:
+                # Wait longer for filters to appear after potential redirect
                 page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             except:
-                print(">> ERROR: Filters not found. Taking screenshot...")
+                print(">> ERROR: Filters not found. We might still be on the Challenge screen.")
                 page.screenshot(path="debug_error_nofilters.png", animations="disabled")
                 raise Exception("Filters did not load.")
             
