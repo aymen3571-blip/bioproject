@@ -63,18 +63,16 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS (THE EMERGENCY EXIT) ---
+# --- ENHANCED CLOUDFLARE BYPASS ---
 def bypass_challenge(page):
     print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
     time.sleep(5)
     
-    # Check if we are even on a challenge page
     title = page.title().lower()
     if "robot" not in title and "moment" not in title and "attention" not in title:
         print(">> No challenge detected (Clean entry).")
         return True
 
-    # 1. TRY TO CLICK THE TURNSTILE WIDGET
     turnstile_frame = None
     for frame in page.frames:
         if "cloudflare" in frame.url or "turnstile" in frame.url:
@@ -96,9 +94,8 @@ def bypass_challenge(page):
         except:
             pass
     else:
-        print(">> Turnstile Widget NOT found (Invisible/Missing).")
+        print(">> Turnstile Widget NOT found.")
 
-    # 2. WAIT AND MONITOR
     print(">> Waiting for reaction (20s)...")
     for i in range(20):
         if "robot" not in page.title().lower():
@@ -106,28 +103,20 @@ def bypass_challenge(page):
             return True
         time.sleep(1)
 
-    # 3. EMERGENCY EXIT: CLICK "MEMBER LOGIN"
-    # If we are stuck, clicking this link often refreshes the session successfully.
     print(">> STUCK! Attempting 'Member Login' bypass...")
     try:
-        # Try different selectors for the link
         login_link = page.get_by_text("Member Login")
         if login_link.count() > 0:
             login_link.click()
             print(">> Clicked 'Member Login'. Waiting for redirect...")
-            
-            # Wait for navigation
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             time.sleep(5)
-            
-            # If we are redirected to Dashboard or Home, we win.
             if "login" not in page.url and "robot" not in page.title().lower():
                  print(">> SUCCESS! Login link bypassed the block.")
                  return True
     except Exception as e:
         print(f">> Login bypass failed: {e}")
 
-    # Final check
     if "robot" in page.title().lower():
         print(">> FAILED: Still blocked.")
         return False
@@ -149,7 +138,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Emergency Exit Edition)...")
+    print(">> Starting DropDax Proxy Scraper (Final Dashboard Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -202,9 +191,18 @@ def main():
             bypass_success = bypass_challenge(page)
             if not bypass_success:
                 page.screenshot(path="debug_block_final.png", animations="disabled")
-                raise Exception("Cloudflare blocked access (Challenge not solved).")
+                raise Exception("Cloudflare blocked access.")
 
-            # 3. HANDLE BANNER
+            # 3. NEW: DASHBOARD REDIRECT LOGIC
+            # If we bypassed by clicking "Member Login", we are now on the dashboard.
+            # We must go back to the home page to search.
+            print(f">> Current URL: {page.url}")
+            if "dashboard" in page.url or "member" in page.url or "my-account" in page.url:
+                print(">> Landed on Dashboard. Redirecting to Home for search...")
+                page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+                time.sleep(5)
+            
+            # 4. HANDLE BANNER
             try:
                 if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
                     print(">> Banner detected. Waiting...")
@@ -213,12 +211,12 @@ def main():
             except:
                 pass
 
-            # 4. APPLY FILTERS
+            # 5. APPLY FILTERS
             print(">> Applying filters...")
             try:
                 page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             except:
-                print(">> ERROR: Filters not found. taking screenshot...")
+                print(">> ERROR: Filters not found. Taking screenshot...")
                 page.screenshot(path="debug_error_nofilters.png", animations="disabled")
                 raise Exception("Filters did not load.")
             
@@ -236,7 +234,7 @@ def main():
 
             page.select_option("select[name='search-results_length']", "25")
             
-            # 5. SCRAPE
+            # 6. SCRAPE
             print(">> Clicking Search...")
             page.click("#search-submit")
             page.wait_for_selector("#search-results tbody tr", state="visible", timeout=60000)
