@@ -110,8 +110,8 @@ def load_cookies(context):
             print(f">> Cookie error: {e}")
 
 # --- ENHANCED CLOUDFLARE BYPASS (THE EMERGENCY EXIT) ---
-def bypass_challenge(page):
-    print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
+def bypass_challenge(page, is_round_2=False):
+    print(f">> CHECKING FOR CLOUDFLARE CHALLENGE (Round 2: {is_round_2})...")
     time.sleep(5)
     
     # Check if we are even on a challenge page
@@ -130,14 +130,20 @@ def bypass_challenge(page):
     if turnstile_frame:
         print(">> Turnstile Widget found. Clicking...")
         try:
+            # METHOD A: Geometry Click (Most Reliable)
+            # We find where the frame is on the screen and click the exact center
             box = turnstile_frame.frame_element().bounding_box()
             if box:
+                # Calculate center of the widget
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
+                
+                # Move mouse there slowly
                 page.mouse.move(click_x, click_y, steps=20)
                 time.sleep(0.5)
                 page.mouse.click(click_x, click_y)
             else:
+                # METHOD B: Selector Click (Fallback)
                 turnstile_frame.click("body", force=True)
         except:
             pass
@@ -150,25 +156,40 @@ def bypass_challenge(page):
             return True
         time.sleep(1)
 
-    # 3. EMERGENCY EXIT: CLICK "MEMBER LOGIN"
-    # If we are stuck, clicking this link often refreshes the session successfully.
-    print(">> STUCK! Attempting 'Member Login' bypass...")
-    try:
-        login_link = page.get_by_text("Member Login")
-        if login_link.count() > 0:
-            login_link.click()
-            print(">> Clicked 'Member Login'. Waiting for redirect...")
+    # 3. EMERGENCY EXIT LOGIC
+    if not is_round_2:
+        # ROUND 1: We are not logged in (or session is fresh). 
+        # Clicking "Member Login" is safe and helps bypass.
+        print(">> STUCK! Attempting 'Member Login' bypass...")
+        try:
+            login_link = page.get_by_text("Member Login")
+            if login_link.count() > 0:
+                login_link.click()
+                print(">> Clicked 'Member Login'. Waiting for redirect...")
+                
+                # Wait for navigation
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                time.sleep(5)
+                
+                # If we are redirected to Dashboard or Home, we win.
+                if "login" not in page.url and "robot" not in page.title().lower():
+                     print(">> SUCCESS! Login link bypassed the block.")
+                     return True
+        except Exception as e:
+            print(f">> Login bypass failed: {e}")
             
-            # Wait for navigation
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-            time.sleep(5)
-            
-            # If we are redirected to Dashboard or Home, we win.
-            if "login" not in page.url and "robot" not in page.title().lower():
-                 print(">> SUCCESS! Login link bypassed the block.")
-                 return True
-    except Exception as e:
-        print(f">> Login bypass failed: {e}")
+    else:
+        # ROUND 2: We are ALREADY logged in (Redirected from Dashboard).
+        # Clicking "Member Login" causes an infinite loop back to the dashboard.
+        # So we DISABLE it here. Instead, we try a reload.
+        print(">> Round 2 (Logged In): Skipping 'Member Login' click to avoid loop.")
+        if "robot" in page.title().lower():
+             print(">> Stalled on Captcha. Attempting Page Reload (Refreshes Cookies)...")
+             try:
+                 page.reload(timeout=30000)
+                 time.sleep(5)
+             except:
+                 pass
 
     # Final check
     if "robot" in page.title().lower():
@@ -199,7 +220,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Double-Tap Bypass)...")
+    print(">> Starting DropDax Proxy Scraper (Final Loop Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -252,7 +273,8 @@ def main():
                 raise Exception("Failed to connect to NameBio.")
             
             # 2. HANDLE CLOUDFLARE (ROUND 1)
-            bypass_success = bypass_challenge(page)
+            # Pass is_round_2=False because this is our first attempt
+            bypass_success = bypass_challenge(page, is_round_2=False)
             if not bypass_success:
                 page.screenshot(path="debug_block_round1.png", animations="disabled")
                 raise Exception("Cloudflare blocked access (Round 1).")
@@ -262,31 +284,34 @@ def main():
             # We must go back to the home page to search.
             print(f">> Current URL: {page.url}")
             
-            if "/account" in page.url or "dashboard" in page.url or "memberships" in page.url:
-                print(">> Landed on Account/Sub-Page. Clicking Logo to return Home...")
+            # Catch ANY sub-page that isn't the home search
+            bad_paths = ["/account", "dashboard", "memberships", "login"]
+            if any(path in page.url for path in bad_paths):
+                print(">> Landed on Account/Sub-Page. Redirecting to Home for search...")
                 
                 try:
-                    # UPDATED: Click the Logo instead of hard page reload to avoid re-triggering block
-                    logo = page.locator(".navbar-brand")
-                    if logo.count() > 0:
-                        logo.click()
-                    else:
-                        # Fallback if logo not found
-                        page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+                    # UPDATED: Use 'referer' to make it look like a natural click back to home
+                    # This reduces the chance of Cloudflare flagging the navigation
+                    current_url = page.url
+                    page.goto("https://namebio.com/", referer=current_url, timeout=60000, wait_until="domcontentloaded")
                 except:
-                    page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+                     pass
 
                 time.sleep(5)
                 print(f">> New URL after redirect: {page.url}")
                 
                 # 4. HANDLE CLOUDFLARE (ROUND 2 - CRITICAL)
-                # Redirecting might trigger the block again (e.g., /captcha)
-                # We run the bypass logic AGAIN to be safe.
+                # We pass is_round_2=True to DISABLE the "Member Login" loop
                 print(">> Running Round 2 Bypass Check...")
-                bypass_success_2 = bypass_challenge(page)
+                bypass_success_2 = bypass_challenge(page, is_round_2=True)
+                
                 if not bypass_success_2:
-                    page.screenshot(path="debug_block_round2.png", animations="disabled")
-                    raise Exception("Cloudflare blocked access (Round 2).")
+                    # One last chance: Check if we are actually ON the home page despite the spinner?
+                    if page.locator("button[data-id='extension']").count() > 0:
+                        print(">> Filters detected despite spinner. Proceeding...")
+                    else:
+                        page.screenshot(path="debug_block_round2.png", animations="disabled")
+                        raise Exception("Cloudflare blocked access (Round 2).")
 
             
             # 5. HANDLE BANNER
