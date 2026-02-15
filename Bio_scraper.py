@@ -26,9 +26,12 @@ def add_stealth_js(context):
 
 def human_mouse_move(page):
     try:
-        for _ in range(random.randint(2, 4)):
-            page.mouse.move(random.randint(100, 800), random.randint(100, 600), steps=5)
-            time.sleep(random.uniform(0.1, 0.3))
+        # Move mouse more naturally to trigger Cloudflare "Human" detection
+        for _ in range(random.randint(3, 6)):
+            x = random.randint(100, 1000)
+            y = random.randint(100, 800)
+            page.mouse.move(x, y, steps=10)
+            time.sleep(random.uniform(0.2, 0.5))
     except:
         pass
 
@@ -52,6 +55,66 @@ def load_cookies(context):
             print(">> Cookies injected.")
         except Exception as e:
             print(f">> Cookie error: {e}")
+
+# NEW: Specific function to handle "Prove you are not a robot" screens
+def bypass_challenge(page):
+    print(">> CHECKING FOR CHALLENGE SCREEN...")
+    title = page.title()
+    
+    if "robot" in title.lower() or "challenge" in title.lower() or "attention" in title.lower():
+        print(f">> Challenge Detected (Title: {title}). Starting Bypass...")
+        
+        # 1. Take a picture of the challenge so we know what we are dealing with
+        try:
+            page.screenshot(path="debug_challenge_screen.png", animations="disabled")
+        except: 
+            pass
+
+        # 2. Wait and Wiggle (Turnstile often auto-solves with good IPs)
+        print(">> Waiting 15 seconds for auto-solve...")
+        human_mouse_move(page)
+        time.sleep(10)
+        human_mouse_move(page)
+        time.sleep(5)
+        
+        # 3. Check if we passed
+        if "robot" not in page.title().lower():
+            print(">> SUCCESS! Challenge bypassed automatically.")
+            return True
+
+        # 4. If still stuck, try to click any frames (Last Resort)
+        print(">> Still stuck. Attempting to click frames...")
+        try:
+            # Click center of screen (common for big buttons)
+            page.mouse.click(960, 540)
+            
+            # Look for common Cloudflare iframes and click them
+            frames = page.frames
+            for frame in frames:
+                try:
+                    # Generic click in the middle of every frame found
+                    box = frame.bounding_box()
+                    if box:
+                        x = box['x'] + (box['width'] / 2)
+                        y = box['y'] + (box['height'] / 2)
+                        page.mouse.click(x, y)
+                except:
+                    pass
+        except:
+            pass
+            
+        time.sleep(10) # Wait for click to process
+        
+        # Final Check
+        if "robot" in page.title().lower():
+             print(">> FAILED to bypass challenge.")
+             return False
+        else:
+             print(">> SUCCESS! Challenge bypassed after clicks.")
+             return True
+             
+    print(">> No challenge detected.")
+    return True
 
 def connect_with_retries(page, url, retries=3):
     """Tries to load the page with extended timeouts."""
@@ -85,7 +148,8 @@ def main():
             "--headless=new",
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
-            "--ignore-certificate-errors" # NEW: Ignore SSL certificate errors from proxy
+            "--ignore-certificate-errors", # NEW: Ignore SSL certificate errors from proxy
+            "--enable-features=NetworkService,NetworkServiceInProcess" # Extra stability
         ]
     }
 
@@ -95,11 +159,7 @@ def main():
             # NEW: Explicitly parse the proxy string to separate credentials from the server.
             # This fixes issues where Playwright fails to parse complex auth strings automatically.
             parsed = urlparse(proxy_url)
-            
-            # Construct the server address (scheme + hostname + port)
             server_address = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-            
-            # Pass credentials explicitly in the dictionary
             launch_options["proxy"] = {
                 "server": server_address,
                 "username": parsed.username,
@@ -107,7 +167,6 @@ def main():
             }
             print(f">> Proxy Configured: {parsed.hostname}:{parsed.port} (Auth: Explicit)")
         except Exception as e:
-             # Fallback if parsing fails for any reason
              print(f">> WARNING: Could not parse proxy URL ({e}). Using raw string.")
              launch_options["proxy"] = {"server": proxy_url}
     else:
@@ -119,7 +178,8 @@ def main():
         # NEW: Added ignore_https_errors=True to trust the proxy certificate
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            ignore_https_errors=True
+            ignore_https_errors=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         
         add_stealth_js(context)
@@ -143,15 +203,17 @@ def main():
             if not connect_with_retries(page, "https://namebio.com/"):
                 raise Exception("Failed to connect to NameBio. Check Proxy URL.")
             
+            # NEW: CHECK FOR AND HANDLE ROBOT/CHALLENGE SCREEN
             human_mouse_move(page)
+            bypass_challenge(page)
             
-            # Check for Block
+            # Check for Block (Final Verification)
             title = page.title()
             print(f">> Page Title: {title}")
-            if "blocked" in title.lower() or "cloudflare" in title.lower():
+            if "blocked" in title.lower() or "prove" in title.lower():
                 print(">> BLOCKED. Saving screenshot...")
                 page.screenshot(path="debug_block_proxy.png", animations="disabled")
-                raise Exception("Cloudflare blocked access.")
+                raise Exception("Cloudflare blocked access (Challenge not solved).")
 
             # 3. HANDLE BANNER
             try:
