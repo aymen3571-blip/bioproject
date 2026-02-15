@@ -5,6 +5,16 @@ import time
 import random
 import sys
 from urllib.parse import urlparse
+import subprocess
+
+# --- ROBUST LIBRARY IMPORT ---
+# This fixes the "ModuleNotFoundError" by force-installing if missing
+try:
+    from playwright_stealth import stealth_sync
+except ImportError:
+    print(">> 'playwright-stealth' not found. Installing...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright-stealth"])
+    from playwright_stealth import stealth_sync
 
 import pytesseract
 from PIL import Image
@@ -15,53 +25,6 @@ from playwright.sync_api import sync_playwright
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
 MAX_RETRIES = 3 
-
-# --- SELF-CONTAINED STEALTH LOGIC (No External Library Needed) ---
-def apply_stealth_scripts(context):
-    """
-    Manually injects the stealth JavaScript to hide the bot.
-    This replaces playwright-stealth to avoid ImportErrors.
-    """
-    # 1. Remove the 'navigator.webdriver' flag (Crucial for Cloudflare)
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-    """)
-
-    # 2. Mock the 'window.chrome' object (Makes it look like real Chrome)
-    context.add_init_script("""
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-    """)
-
-    # 3. Mock Plugins (Real browsers have plugins, bots usually don't)
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-    """)
-
-    # 4. Mock Languages
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-    """)
-    
-    # 5. Mask Permissions (Bots often fail permission checks)
-    context.add_init_script("""
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
-    """)
 
 def human_mouse_move(page):
     try:
@@ -147,7 +110,7 @@ def connect_with_retries(page, url, retries=3):
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
-            # Use 'domcontentloaded' to return faster, then handle challenge
+            # Use 'domcontentloaded' to return faster
             page.goto(url, timeout=90000, wait_until="domcontentloaded") 
             
             # Check for immediate chrome error (proxy failure)
@@ -165,16 +128,17 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Final Stealth)...")
+    print(">> Starting DropDax Proxy Scraper (Final Headful Edition)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
     launch_options = {
-        "headless": True,
+        "headless": False,  # <--- CRITICAL CHANGE: We are now running VISIBLE browser (via xvfb)
         "args": [
-            "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--ignore-certificate-errors",
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
             "--enable-features=NetworkService,NetworkServiceInProcess"
         ]
     }
@@ -197,19 +161,18 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_options)
         
-        # Create context with explicit settings
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             ignore_https_errors=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         
-        # APPLY THE MANUAL STEALTH PATCHES (Replaces the broken library)
-        apply_stealth_scripts(context)
+        # APPLY THE REAL STEALTH LIBRARY
+        print(">> Applying Playwright-Stealth patches...")
+        page = context.new_page()
+        stealth_sync(page)
         
         try:
-            page = context.new_page()
-
             # 1. LOGIN & CONNECT
             load_cookies(context)
             
