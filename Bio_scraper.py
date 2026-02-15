@@ -10,11 +10,11 @@ import subprocess
 # --- ROBUST LIBRARY IMPORT ---
 # This fixes the "ModuleNotFoundError" by force-installing if missing
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth
 except ImportError:
     print(">> 'playwright-stealth' not found. Installing...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright-stealth"])
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth
 
 import pytesseract
 from PIL import Image
