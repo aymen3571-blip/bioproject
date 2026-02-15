@@ -21,35 +21,39 @@ jobs:
         with:
           python-version: '3.10'
 
+      # 1. Install System Dependencies (Tesseract OCR)
       - name: Install Tesseract OCR (System)
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
 
+      # 2. Install Python Libraries (Added playwright-stealth here!)
       - name: Install Python Dependencies
         run: |
-          pip install playwright pytesseract pillow
+          pip install playwright pytesseract pillow playwright-stealth
           playwright install chromium
 
-      # Decode the secret into the JSON file
+      # 3. Create Session File
       - name: Create Session File
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
+      # 4. Run Scraper with Proxy Secret
       - name: Run Scraper
         env: 
-          PROXY_URL: ${{ secrets.PROXY_URL }}  # <--- THIS IS NEW
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: python Bio_scraper.py
 
-      # NEW: This step uploads the screenshots if they exist
+      # 5. Upload Screenshots if it fails
       - name: Upload Debug Screenshots
-        if: always() # Run this even if the scraper fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: "*.png"
 
+      # 6. Commit Results
       - name: Commit and Push
-        if: success() # Only push if scraper worked
+        if: success()
         run: |
           git config --global user.name "DropDax Bot"
           git config --global user.email "bot@dropdax.com"
