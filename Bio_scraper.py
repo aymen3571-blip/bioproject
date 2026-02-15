@@ -7,14 +7,9 @@ import sys
 from urllib.parse import urlparse
 import subprocess
 
-# --- ROBUST LIBRARY IMPORT ---
-# This fixes the "ModuleNotFoundError" by force-installing if missing
-try:
-    from playwright_stealth import Stealth
-except ImportError:
-    print(">> 'playwright-stealth' not found. Installing...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright-stealth"])
-    from playwright_stealth import Stealth
+# --- LIBRARY FIX ---
+# We REMOVE the external playwright-stealth import to stop the crashing.
+# We will inject the stealth logic manually below.
 
 import pytesseract
 from PIL import Image
@@ -25,6 +20,75 @@ from playwright.sync_api import sync_playwright
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
 MAX_RETRIES = 3 
+
+# --- ADVANCED NATIVE STEALTH ---
+# This replaces the external library with specific hacks that Cloudflare looks for.
+def apply_advanced_stealth(page):
+    """
+    Injects specific JavaScript overrides to mask the bot.
+    Includes WebGL spoofing which is crucial for Cloudflare.
+    """
+    
+    # 1. Mask the WebDriver flag (The #1 detection method)
+    page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+    """)
+
+    # 2. Mock the Chrome Object (So it looks like Google Chrome, not a script)
+    page.add_init_script("""
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+    """)
+
+    # 3. Spoof WebGL Vendor (CRITICAL FOR CLOUDFLARE)
+    # Headless browsers usually show "Google SwiftShader" which is a dead giveaway.
+    # We force it to say "Intel Iris OpenGL" to look like a real laptop.
+    page.add_init_script("""
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            // 37445 = UNMASKED_VENDOR_WEBGL
+            if (parameter === 37445) {
+                return 'Intel Inc.';
+            }
+            // 37446 = UNMASKED_RENDERER_WEBGL
+            if (parameter === 37446) {
+                return 'Intel(R) Iris(TM) Plus Graphics 640';
+            }
+            return getParameter(parameter);
+        };
+    """)
+
+    # 4. Mock Plugins (Bots have 0 plugins, Humans have PDF viewers etc)
+    page.add_init_script("""
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+    """)
+
+    # 5. Fix Window Dimensions (Headless windows sometimes report 0)
+    page.add_init_script("""
+        Object.defineProperty(window, 'outerWidth', { value: window.innerWidth });
+        Object.defineProperty(window, 'outerHeight', { value: window.innerHeight });
+    """)
+
+    # 6. Mask Permissions
+    page.add_init_script("""
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            originalQuery(parameters)
+        );
+    """)
 
 def human_mouse_move(page):
     try:
@@ -128,18 +192,21 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Final Headful Edition)...")
+    print(">> Starting DropDax Proxy Scraper (Native Stealth)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
     launch_options = {
-        "headless": False,  # <--- CRITICAL CHANGE: We are now running VISIBLE browser (via xvfb)
+        # IMPORTANT: We use headless=False because we are running in xvfb (Virtual Screen).
+        # Cloudflare hates 'headless=True'.
+        "headless": False, 
         "args": [
             "--no-sandbox",
             "--ignore-certificate-errors",
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
-            "--enable-features=NetworkService,NetworkServiceInProcess"
+            "--enable-features=NetworkService,NetworkServiceInProcess",
+            "--window-size=1920,1080"
         ]
     }
 
@@ -167,12 +234,12 @@ def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         
-        # APPLY THE REAL STEALTH LIBRARY
-        print(">> Applying Playwright-Stealth patches...")
-        page = context.new_page()
-        stealth_sync(page)
-        
         try:
+            page = context.new_page()
+            
+            # APPLY THE ADVANCED STEALTH
+            apply_advanced_stealth(page)
+
             # 1. LOGIN & CONNECT
             load_cookies(context)
             
