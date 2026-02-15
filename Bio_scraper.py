@@ -20,9 +20,6 @@ MAX_RETRIES = 3
 
 # --- ADVANCED NATIVE STEALTH ---
 def apply_advanced_stealth(page):
-    """
-    Injects specific JavaScript overrides to mask the bot.
-    """
     page.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
@@ -38,7 +35,6 @@ def apply_advanced_stealth(page):
 
 def human_mouse_move(page):
     try:
-        # Move mouse to random positions to simulate human 'hesitation'
         for _ in range(random.randint(2, 4)):
             x = random.randint(100, 1000)
             y = random.randint(100, 800)
@@ -67,84 +63,93 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS (THE PATIENT WAITER) ---
+# --- ENHANCED CLOUDFLARE BYPASS (THE EMERGENCY EXIT) ---
 def bypass_challenge(page):
     print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
     time.sleep(5)
     
-    # 1. IDENTIFY THE FRAME
+    # Check if we are even on a challenge page
+    title = page.title().lower()
+    if "robot" not in title and "moment" not in title and "attention" not in title:
+        print(">> No challenge detected (Clean entry).")
+        return True
+
+    # 1. TRY TO CLICK THE TURNSTILE WIDGET
     turnstile_frame = None
     for frame in page.frames:
         if "cloudflare" in frame.url or "turnstile" in frame.url:
             turnstile_frame = frame
-            print(f">> Found Turnstile Frame: {frame.url}")
             break
             
     if turnstile_frame:
-        print(">> Attempting to click Turnstile Checkbox...")
+        print(">> Turnstile Widget found. Clicking...")
         try:
-            # METHOD A: Geometry Click
             box = turnstile_frame.frame_element().bounding_box()
             if box:
-                print(f">> Frame detected at X={box['x']}, Y={box['y']}")
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
-                
-                # Move mouse there slowly
                 page.mouse.move(click_x, click_y, steps=20)
                 time.sleep(0.5)
                 page.mouse.click(click_x, click_y)
-                print(">> Clicked via Coordinates.")
             else:
-                # METHOD B: Selector Click
-                print(">> Coordinates failed. Trying selector...")
                 turnstile_frame.click("body", force=True)
-                
-        except Exception as e:
-            print(f">> Click failed: {e}")
+        except:
+            pass
+    else:
+        print(">> Turnstile Widget NOT found (Invisible/Missing).")
 
-    # 2. PATIENT WAIT LOOP (Updated)
-    # Cloudflare spinners can take 20-30s on proxies. We wait up to 45s.
-    print(">> Waiting for spinner to finish (Max 45s)...")
-    
-    for i in range(45):
-        title = page.title().lower()
-        if "robot" not in title and "moment" not in title and "attention" not in title:
+    # 2. WAIT AND MONITOR
+    print(">> Waiting for reaction (20s)...")
+    for i in range(20):
+        if "robot" not in page.title().lower():
             print(">> SUCCESS! Challenge passed.")
             return True
-            
-        # Every 5 seconds, wiggle mouse to show we are alive
-        if i % 5 == 0:
-            print(f">> Still verifying... ({i}s)")
-            human_mouse_move(page)
-            
         time.sleep(1)
+
+    # 3. EMERGENCY EXIT: CLICK "MEMBER LOGIN"
+    # If we are stuck, clicking this link often refreshes the session successfully.
+    print(">> STUCK! Attempting 'Member Login' bypass...")
+    try:
+        # Try different selectors for the link
+        login_link = page.get_by_text("Member Login")
+        if login_link.count() > 0:
+            login_link.click()
+            print(">> Clicked 'Member Login'. Waiting for redirect...")
+            
+            # Wait for navigation
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            time.sleep(5)
+            
+            # If we are redirected to Dashboard or Home, we win.
+            if "login" not in page.url and "robot" not in page.title().lower():
+                 print(">> SUCCESS! Login link bypassed the block.")
+                 return True
+    except Exception as e:
+        print(f">> Login bypass failed: {e}")
+
+    # Final check
+    if "robot" in page.title().lower():
+        print(">> FAILED: Still blocked.")
+        return False
         
-    print(">> FAILED: Spinner timed out. Taking screenshot.")
-    return False
+    return True
 
 def connect_with_retries(page, url, retries=3):
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
-            # Use 'domcontentloaded' to return faster
             page.goto(url, timeout=90000, wait_until="domcontentloaded") 
-            
-            if "chrome-error" in page.url:
-                raise Exception("Proxy dropped connection (Chrome Error).")
-
+            if "chrome-error" in page.url: raise Exception("Proxy Error")
             time.sleep(5)
             return True
         except Exception as e:
             print(f">> Attempt {attempt} failed: {e}")
-            if attempt < retries:
-                time.sleep(10)
-            else:
-                return False
+            if attempt < retries: time.sleep(10)
+            else: return False
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Patient Edition)...")
+    print(">> Starting DropDax Proxy Scraper (Emergency Exit Edition)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -172,7 +177,6 @@ def main():
             }
             print(f">> Proxy Configured: {parsed.hostname}:{parsed.port}")
         except:
-             print(">> WARNING: Could not parse proxy URL. Using raw string.")
              launch_options["proxy"] = {"server": proxy_url}
 
     with sync_playwright() as p:
@@ -202,7 +206,6 @@ def main():
 
             # 3. HANDLE BANNER
             try:
-                # Look for the banner more aggressively
                 if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
                     print(">> Banner detected. Waiting...")
                     page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
@@ -213,10 +216,9 @@ def main():
             # 4. APPLY FILTERS
             print(">> Applying filters...")
             try:
-                # Wait longer for filters to appear after challenge
                 page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             except:
-                print(">> ERROR: Filters not found. We might still be on the Challenge screen.")
+                print(">> ERROR: Filters not found. taking screenshot...")
                 page.screenshot(path="debug_error_nofilters.png", animations="disabled")
                 raise Exception("Filters did not load.")
             
