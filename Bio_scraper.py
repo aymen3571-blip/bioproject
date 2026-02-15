@@ -274,14 +274,16 @@ def main():
                 page.screenshot(path="debug_block_final.png", animations="disabled")
                 raise Exception("Cloudflare blocked access (Challenge not solved).")
 
-            # 3. NEW: DASHBOARD REDIRECT LOGIC (FIXED)
-            # If we bypassed by clicking "Member Login", we end up on /account
+            # 3. NEW: DASHBOARD REDIRECT LOGIC (FIXED & EXPANDED)
+            # If we bypassed by clicking "Member Login", we might end up on /account, /memberships, or /login
             # We must go back to the home page to search.
             print(f">> Current URL: {page.url}")
             
-            # NEW: Explicitly check for '/account'
-            if "/account" in page.url or "dashboard" in page.url:
-                print(">> Landed on Account Page. Redirecting to Home for search...")
+            # NEW: Check for ANY non-home page (Account, Dashboard, Memberships, Login)
+            # We check if any of these keywords are in the URL to trigger a redirect
+            bad_paths = ["/account", "dashboard", "memberships", "login"]
+            if any(path in page.url for path in bad_paths):
+                print(">> Landed on Account/Sub-Page. Redirecting to Home for search...")
                 
                 # Force navigation back to home
                 page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
