@@ -82,7 +82,8 @@ def main():
         "args": [
             "--headless=new",
             "--disable-blink-features=AutomationControlled",
-            "--no-sandbox"
+            "--no-sandbox",
+            "--ignore-certificate-errors" # NEW: Ignore SSL certificate errors from proxy
         ]
     }
 
@@ -97,7 +98,13 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_options)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        
+        # NEW: Added ignore_https_errors=True to trust the proxy certificate
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            ignore_https_errors=True
+        )
+        
         add_stealth_js(context)
         
         try:
