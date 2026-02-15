@@ -3,18 +3,10 @@ import json
 import csv
 import time
 import random
-import sys
-import subprocess
 from urllib.parse import urlparse
 
-# --- AUTO-INSTALL PLAYWRIGHT STEALTH ---
-# This ensures the library exists even if you didn't add it to YAML
-try:
-    from playwright_stealth import stealth_sync
-except ImportError:
-    print(">> Installing playwright-stealth...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright-stealth"])
-    from playwright_stealth import stealth_sync
+# We import stealth_sync directly now because YAML installs it properly
+from playwright_stealth import stealth_sync
 
 import pytesseract
 from PIL import Image
@@ -65,13 +57,11 @@ def bypass_challenge(page):
     time.sleep(5)
     
     # Look for frames that might contain the Turnstile widget
-    # Cloudflare often puts the checkbox inside an iframe
     frames = page.frames
     turnstile_frame = None
     
     for frame in frames:
         try:
-            # Common indicators of the Cloudflare iframe
             if "cloudflare" in frame.url or "turnstile" in frame.url:
                 turnstile_frame = frame
                 print(f">> Found Turnstile Frame: {frame.url}")
@@ -83,10 +73,8 @@ def bypass_challenge(page):
         print(">> Attempting to click Turnstile Checkbox...")
         try:
             # The checkbox is often a simple 'body' click inside that specific iframe
-            # or a specific checkbox element
             box = turnstile_frame.wait_for_selector("body", timeout=5000)
             if box:
-                # Wiggle before clicking
                 human_mouse_move(page)
                 box.click()
                 print(">> Clicked Turnstile widget.")
@@ -115,10 +103,13 @@ def connect_with_retries(page, url, retries=3):
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
-            # Use 'domcontentloaded' to return faster, then handle challenge
+            # Use 'domcontentloaded' to return faster
             page.goto(url, timeout=90000, wait_until="domcontentloaded") 
             
-            # Wait for EITHER the body OR the challenge to appear
+            # Check for immediate chrome error (proxy failure)
+            if "chrome-error" in page.url:
+                raise Exception("Proxy dropped connection (Chrome Error).")
+
             time.sleep(5)
             return True
         except Exception as e:
@@ -134,7 +125,7 @@ def main():
     
     proxy_url = os.environ.get("PROXY_URL") 
     
-    # Use standard args, but rely on 'stealth_sync' to patch them
+    # Use standard args, rely on 'stealth_sync' to patch them
     launch_options = {
         "headless": True,
         "args": [
@@ -163,7 +154,6 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_options)
         
-        # Create context with explicit Stealth settings
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             ignore_https_errors=True,
@@ -182,7 +172,7 @@ def main():
             if not connect_with_retries(page, "https://namebio.com/"):
                 raise Exception("Failed to connect to NameBio.")
             
-            # 2. HANDLE CLOUDFLARE (The Logic is now separate)
+            # 2. HANDLE CLOUDFLARE
             bypass_success = bypass_challenge(page)
             if not bypass_success:
                 page.screenshot(path="debug_block_final.png", animations="disabled")
@@ -201,12 +191,11 @@ def main():
 
             # 4. APPLY FILTERS
             print(">> Applying filters...")
-            # If we passed Cloudflare, this selector should appear
             try:
                 page.wait_for_selector("button[data-id='extension']", state="attached", timeout=30000)
             except:
                 print(">> ERROR: Filters not found. We might still be on the Challenge screen.")
-                page.screenshot(path="debug_error_nofilters.png")
+                page.screenshot(path="debug_error_nofilters.png", animations="disabled")
                 raise Exception("Filters did not load.")
             
             page.click("button[data-id='extension']")
