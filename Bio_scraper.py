@@ -43,19 +43,11 @@ def apply_advanced_stealth(page):
     """)
 
     # 3. Spoof WebGL Vendor (CRITICAL FOR CLOUDFLARE)
-    # Headless browsers usually show "Google SwiftShader" which is a dead giveaway.
-    # We force it to say "Intel Iris OpenGL" to look like a real laptop.
     page.add_init_script("""
         const getParameter = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            // 37445 = UNMASKED_VENDOR_WEBGL
-            if (parameter === 37445) {
-                return 'Intel Inc.';
-            }
-            // 37446 = UNMASKED_RENDERER_WEBGL
-            if (parameter === 37446) {
-                return 'Intel(R) Iris(TM) Plus Graphics 640';
-            }
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
             return getParameter(parameter);
         };
     """)
@@ -138,25 +130,17 @@ def bypass_challenge(page):
     if turnstile_frame:
         print(">> Turnstile Widget found. Clicking...")
         try:
-            # METHOD A: Geometry Click (Most Reliable)
-            # We find where the frame is on the screen and click the exact center
             box = turnstile_frame.frame_element().bounding_box()
             if box:
-                # Calculate center of the widget
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
-                
-                # Move mouse there slowly
                 page.mouse.move(click_x, click_y, steps=20)
                 time.sleep(0.5)
                 page.mouse.click(click_x, click_y)
             else:
-                # METHOD B: Selector Click (Fallback)
                 turnstile_frame.click("body", force=True)
         except:
             pass
-    else:
-        print(">> Turnstile Widget NOT found (Invisible/Missing).")
 
     # 2. WAIT AND MONITOR
     print(">> Waiting for reaction (20s)...")
@@ -170,7 +154,6 @@ def bypass_challenge(page):
     # If we are stuck, clicking this link often refreshes the session successfully.
     print(">> STUCK! Attempting 'Member Login' bypass...")
     try:
-        # Try different selectors for the link
         login_link = page.get_by_text("Member Login")
         if login_link.count() > 0:
             login_link.click()
@@ -216,7 +199,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Final Dashboard Fix)...")
+    print(">> Starting DropDax Proxy Scraper (Double-Tap Bypass)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -268,31 +251,45 @@ def main():
             if not connect_with_retries(page, "https://namebio.com/"):
                 raise Exception("Failed to connect to NameBio.")
             
-            # 2. HANDLE CLOUDFLARE
+            # 2. HANDLE CLOUDFLARE (ROUND 1)
             bypass_success = bypass_challenge(page)
             if not bypass_success:
-                page.screenshot(path="debug_block_final.png", animations="disabled")
-                raise Exception("Cloudflare blocked access (Challenge not solved).")
+                page.screenshot(path="debug_block_round1.png", animations="disabled")
+                raise Exception("Cloudflare blocked access (Round 1).")
 
-            # 3. NEW: DASHBOARD REDIRECT LOGIC (FIXED & EXPANDED)
-            # If we bypassed by clicking "Member Login", we might end up on /account, /memberships, or /login
+            # 3. DASHBOARD REDIRECT LOGIC
+            # If we bypassed by clicking "Member Login", we end up on /account
             # We must go back to the home page to search.
             print(f">> Current URL: {page.url}")
             
-            # NEW: Check for ANY non-home page (Account, Dashboard, Memberships, Login)
-            # We check if any of these keywords are in the URL to trigger a redirect
-            bad_paths = ["/account", "dashboard", "memberships", "login"]
-            if any(path in page.url for path in bad_paths):
-                print(">> Landed on Account/Sub-Page. Redirecting to Home for search...")
+            if "/account" in page.url or "dashboard" in page.url or "memberships" in page.url:
+                print(">> Landed on Account/Sub-Page. Clicking Logo to return Home...")
                 
-                # Force navigation back to home
-                page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+                try:
+                    # UPDATED: Click the Logo instead of hard page reload to avoid re-triggering block
+                    logo = page.locator(".navbar-brand")
+                    if logo.count() > 0:
+                        logo.click()
+                    else:
+                        # Fallback if logo not found
+                        page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+                except:
+                    page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
+
                 time.sleep(5)
-                
-                # Double check we made it back
                 print(f">> New URL after redirect: {page.url}")
+                
+                # 4. HANDLE CLOUDFLARE (ROUND 2 - CRITICAL)
+                # Redirecting might trigger the block again (e.g., /captcha)
+                # We run the bypass logic AGAIN to be safe.
+                print(">> Running Round 2 Bypass Check...")
+                bypass_success_2 = bypass_challenge(page)
+                if not bypass_success_2:
+                    page.screenshot(path="debug_block_round2.png", animations="disabled")
+                    raise Exception("Cloudflare blocked access (Round 2).")
+
             
-            # 4. HANDLE BANNER
+            # 5. HANDLE BANNER
             try:
                 # Look for the banner more aggressively
                 if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
@@ -303,7 +300,7 @@ def main():
             except:
                 pass
 
-            # 5. APPLY FILTERS
+            # 6. APPLY FILTERS
             print(">> Applying filters...")
             try:
                 # Wait longer for filters to appear after potential redirect
@@ -327,7 +324,7 @@ def main():
 
             page.select_option("select[name='search-results_length']", "25")
             
-            # 6. SCRAPE
+            # 7. SCRAPE
             print(">> Clicking Search...")
             page.click("#search-submit")
             page.wait_for_selector("#search-results tbody tr", state="visible", timeout=60000)
