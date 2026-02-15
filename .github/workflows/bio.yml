@@ -36,6 +36,8 @@ jobs:
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
       - name: Run Scraper
+        env: 
+          PROXY_URL: ${{ secrets.PROXY_URL }}  # <--- THIS IS NEW
         run: python Bio_scraper.py
 
       # NEW: This step uploads the screenshots if they exist
