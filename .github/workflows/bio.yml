@@ -21,13 +21,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install System Dependencies (Tesseract OCR)
-      - name: Install Tesseract OCR (System)
+      # 1. Install System Dependencies (Added xvfb)
+      - name: Install System Deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
+          sudo apt-get install -y tesseract-ocr xvfb
 
-      # 2. Install Python Libraries (Added playwright-stealth here!)
+      # 2. Install Python Libraries (Added playwright-stealth)
       - name: Install Python Dependencies
         run: |
           pip install playwright pytesseract pillow playwright-stealth
@@ -37,11 +37,12 @@ jobs:
       - name: Create Session File
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
-      # 4. Run Scraper with Proxy Secret
+      # 4. Run Scraper with Virtual Display (xvfb-run)
+      # This enables "headless=False" to work on the server!
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
-        run: python Bio_scraper.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python Bio_scraper.py
 
       # 5. Upload Screenshots if it fails
       - name: Upload Debug Screenshots
