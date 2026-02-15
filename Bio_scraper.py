@@ -6,6 +6,8 @@ import random
 import pytesseract
 from PIL import Image
 from io import BytesIO
+# NEW: Import urlparse to safely split the proxy string
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
@@ -89,10 +91,25 @@ def main():
 
     if proxy_url:
         print(">> PROXY DETECTED.")
-        # Print masked proxy to debug format issues
-        masked_proxy = proxy_url.replace(proxy_url.split(":")[2].split("@")[0], "****")
-        print(f">> Using Proxy: {masked_proxy}")
-        launch_options["proxy"] = {"server": proxy_url}
+        try:
+            # NEW: Explicitly parse the proxy string to separate credentials from the server.
+            # This fixes issues where Playwright fails to parse complex auth strings automatically.
+            parsed = urlparse(proxy_url)
+            
+            # Construct the server address (scheme + hostname + port)
+            server_address = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+            
+            # Pass credentials explicitly in the dictionary
+            launch_options["proxy"] = {
+                "server": server_address,
+                "username": parsed.username,
+                "password": parsed.password
+            }
+            print(f">> Proxy Configured: {parsed.hostname}:{parsed.port} (Auth: Explicit)")
+        except Exception as e:
+             # Fallback if parsing fails for any reason
+             print(f">> WARNING: Could not parse proxy URL ({e}). Using raw string.")
+             launch_options["proxy"] = {"server": proxy_url}
     else:
         print(">> No proxy found. Running on default IP.")
 
@@ -113,11 +130,12 @@ def main():
             # 1. TEST PROXY CONNECTION FIRST
             print(">> Testing Proxy Connection (ipify)...")
             try:
-                page.goto("https://api.ipify.org?format=json", timeout=30000)
+                # NEW: Increased timeout to 60s because rotating proxies can be slow to handshake
+                page.goto("https://api.ipify.org?format=json", timeout=60000)
                 content = page.content()
                 print(f">> Proxy is working! IP Info: {page.inner_text('body')}")
             except Exception as e:
-                print(f">> WARNING: Proxy test failed. URL format might be wrong. Error: {e}")
+                print(f">> WARNING: Proxy test failed. URL format might be wrong or proxy is slow. Error: {e}")
 
             # 2. LOGIN & CONNECT
             load_cookies(context)
