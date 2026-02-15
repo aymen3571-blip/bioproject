@@ -67,7 +67,7 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS (THE FIX) ---
+# --- ENHANCED CLOUDFLARE BYPASS (THE PATIENT WAITER) ---
 def bypass_challenge(page):
     print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
     time.sleep(5)
@@ -83,12 +83,10 @@ def bypass_challenge(page):
     if turnstile_frame:
         print(">> Attempting to click Turnstile Checkbox...")
         try:
-            # METHOD A: Geometry Click (Most Reliable)
-            # We find where the frame is on the screen and click the exact center
+            # METHOD A: Geometry Click
             box = turnstile_frame.frame_element().bounding_box()
             if box:
                 print(f">> Frame detected at X={box['x']}, Y={box['y']}")
-                # Calculate center of the widget
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
                 
@@ -98,29 +96,32 @@ def bypass_challenge(page):
                 page.mouse.click(click_x, click_y)
                 print(">> Clicked via Coordinates.")
             else:
-                # METHOD B: Selector Click (Fallback)
+                # METHOD B: Selector Click
                 print(">> Coordinates failed. Trying selector...")
                 turnstile_frame.click("body", force=True)
                 
-            time.sleep(2)
         except Exception as e:
             print(f">> Click failed: {e}")
 
-    # 2. WAIT FOR SOLVE
-    title = page.title().lower()
-    if "robot" in title or "moment" in title or "attention" in title:
-        print(">> Waiting 10s for Cloudflare to process...")
-        time.sleep(10)
-        
-        if "robot" not in page.title().lower():
-            print(">> SUCCESS! Challenge bypassed.")
-            return True
-        else:
-            print(">> FAILED: Still stuck. Taking screenshot.")
-            return False
+    # 2. PATIENT WAIT LOOP (Updated)
+    # Cloudflare spinners can take 20-30s on proxies. We wait up to 45s.
+    print(">> Waiting for spinner to finish (Max 45s)...")
     
-    print(">> No challenge detected (or passed automatically).")
-    return True
+    for i in range(45):
+        title = page.title().lower()
+        if "robot" not in title and "moment" not in title and "attention" not in title:
+            print(">> SUCCESS! Challenge passed.")
+            return True
+            
+        # Every 5 seconds, wiggle mouse to show we are alive
+        if i % 5 == 0:
+            print(f">> Still verifying... ({i}s)")
+            human_mouse_move(page)
+            
+        time.sleep(1)
+        
+    print(">> FAILED: Spinner timed out. Taking screenshot.")
+    return False
 
 def connect_with_retries(page, url, retries=3):
     for attempt in range(1, retries + 1):
@@ -143,7 +144,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Final Headful Edition)...")
+    print(">> Starting DropDax Proxy Scraper (Patient Edition)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -201,7 +202,8 @@ def main():
 
             # 3. HANDLE BANNER
             try:
-                if page.locator("#nudge-countdown-container").is_visible(timeout=5000):
+                # Look for the banner more aggressively
+                if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
                     print(">> Banner detected. Waiting...")
                     page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
                     print(">> Banner closed.")
@@ -211,7 +213,8 @@ def main():
             # 4. APPLY FILTERS
             print(">> Applying filters...")
             try:
-                page.wait_for_selector("button[data-id='extension']", state="attached", timeout=30000)
+                # Wait longer for filters to appear after challenge
+                page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             except:
                 print(">> ERROR: Filters not found. We might still be on the Challenge screen.")
                 page.screenshot(path="debug_error_nofilters.png", animations="disabled")
