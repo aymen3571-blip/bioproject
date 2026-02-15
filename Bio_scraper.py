@@ -18,6 +18,15 @@ COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
 MAX_RETRIES = 3 
 
+# --- STEALTH FUNCTIONS ---
+def add_stealth_js(context):
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    """)
+
 # --- ADVANCED NATIVE STEALTH ---
 def apply_advanced_stealth(page):
     """
@@ -46,8 +55,14 @@ def apply_advanced_stealth(page):
     page.add_init_script("""
         const getParameter = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+            // 37445 = UNMASKED_VENDOR_WEBGL
+            if (parameter === 37445) {
+                return 'Intel Inc.';
+            }
+            // 37446 = UNMASKED_RENDERER_WEBGL
+            if (parameter === 37446) {
+                return 'Intel(R) Iris(TM) Plus Graphics 640';
+            }
             return getParameter(parameter);
         };
     """)
@@ -91,6 +106,7 @@ def human_mouse_move(page):
 
 def get_price_via_ocr(cell_element):
     try:
+        # animations="disabled" helps stability
         png_bytes = cell_element.screenshot(animations="disabled")
         image = Image.open(BytesIO(png_bytes))
         text = pytesseract.image_to_string(image, config='--psm 7').strip()
@@ -109,32 +125,38 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS (THE EMERGENCY EXIT) ---
+# --- ENHANCED CLOUDFLARE BYPASS (RADAR MODE) ---
 def bypass_challenge(page, is_round_2=False):
     print(f">> CHECKING FOR CLOUDFLARE CHALLENGE (Round 2: {is_round_2})...")
+    
+    # 0. WAIT FOR LOAD (Crucial for Round 2)
+    # If we just redirected, the widget might not be ready yet.
     time.sleep(5)
     
-    # Check if we are even on a challenge page
-    title = page.title().lower()
-    if "robot" not in title and "moment" not in title and "attention" not in title:
-        print(">> No challenge detected (Clean entry).")
-        return True
-
-    # 1. TRY TO CLICK THE TURNSTILE WIDGET
+    # 1. RADAR SCAN: Look for the frame for up to 15 seconds
     turnstile_frame = None
-    for frame in page.frames:
-        if "cloudflare" in frame.url or "turnstile" in frame.url:
-            turnstile_frame = frame
+    print(">> Scanning for Turnstile Widget...")
+    
+    for i in range(15): # Loop 15 times (15 seconds)
+        for frame in page.frames:
+            if "cloudflare" in frame.url or "turnstile" in frame.url:
+                turnstile_frame = frame
+                break
+        
+        if turnstile_frame:
+            print(f">> Turnstile Widget FOUND on attempt {i+1}!")
             break
             
+        time.sleep(1) # Wait 1 second before looking again
+
+    # 2. CLICK LOGIC
     if turnstile_frame:
-        print(">> Turnstile Widget found. Clicking...")
+        print(">> Clicking Turnstile Widget...")
         try:
-            # METHOD A: Geometry Click (Most Reliable)
-            # We find where the frame is on the screen and click the exact center
+            time.sleep(1) # Settle
             box = turnstile_frame.frame_element().bounding_box()
             if box:
-                # Calculate center of the widget
+                # Geometry Click (Most Reliable)
                 click_x = box['x'] + (box['width'] / 2)
                 click_y = box['y'] + (box['height'] / 2)
                 
@@ -143,53 +165,47 @@ def bypass_challenge(page, is_round_2=False):
                 time.sleep(0.5)
                 page.mouse.click(click_x, click_y)
             else:
-                # METHOD B: Selector Click (Fallback)
+                # Fallback
                 turnstile_frame.click("body", force=True)
-        except:
-            pass
+        except Exception as e:
+            print(f">> Click error: {e}")
+    else:
+        print(">> Turnstile Widget NOT found after scan.")
 
-    # 2. WAIT AND MONITOR
-    print(">> Waiting for reaction (20s)...")
-    for i in range(20):
+    # 3. WAIT AND MONITOR
+    print(">> Waiting for reaction (25s)...")
+    for i in range(25):
         if "robot" not in page.title().lower():
             print(">> SUCCESS! Challenge passed.")
             return True
+        # Wiggle mouse periodically to stay "alive"
+        if i % 5 == 0: human_mouse_move(page)
         time.sleep(1)
 
-    # 3. EMERGENCY EXIT LOGIC
+    # 4. EMERGENCY EXIT LOGIC
     if not is_round_2:
-        # ROUND 1: We are not logged in (or session is fresh). 
-        # Clicking "Member Login" is safe and helps bypass.
+        # ROUND 1: Try Member Login
         print(">> STUCK! Attempting 'Member Login' bypass...")
         try:
             login_link = page.get_by_text("Member Login")
             if login_link.count() > 0:
                 login_link.click()
                 print(">> Clicked 'Member Login'. Waiting for redirect...")
-                
-                # Wait for navigation
                 page.wait_for_load_state("domcontentloaded", timeout=30000)
                 time.sleep(5)
-                
-                # If we are redirected to Dashboard or Home, we win.
                 if "login" not in page.url and "robot" not in page.title().lower():
                      print(">> SUCCESS! Login link bypassed the block.")
                      return True
-        except Exception as e:
-            print(f">> Login bypass failed: {e}")
-            
+        except:
+            pass
     else:
-        # ROUND 2: We are ALREADY logged in (Redirected from Dashboard).
-        # Clicking "Member Login" causes an infinite loop back to the dashboard.
-        # So we DISABLE it here. Instead, we try a reload.
-        print(">> Round 2 (Logged In): Skipping 'Member Login' click to avoid loop.")
-        if "robot" in page.title().lower():
-             print(">> Stalled on Captcha. Attempting Page Reload (Refreshes Cookies)...")
-             try:
-                 page.reload(timeout=30000)
-                 time.sleep(5)
-             except:
-                 pass
+        # ROUND 2: Do NOT click Member Login (Avoids Loop). Try Force Reload.
+        print(">> Round 2 Stuck. Attempting Force Reload...")
+        try:
+            page.reload(timeout=30000)
+            time.sleep(5)
+        except:
+            pass
 
     # Final check
     if "robot" in page.title().lower():
@@ -199,6 +215,7 @@ def bypass_challenge(page, is_round_2=False):
     return True
 
 def connect_with_retries(page, url, retries=3):
+    """Tries to load the page with extended timeouts."""
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
@@ -291,7 +308,6 @@ def main():
                 
                 try:
                     # UPDATED: Use 'referer' to make it look like a natural click back to home
-                    # This reduces the chance of Cloudflare flagging the navigation
                     current_url = page.url
                     page.goto("https://namebio.com/", referer=current_url, timeout=60000, wait_until="domcontentloaded")
                 except:
@@ -301,25 +317,25 @@ def main():
                 print(f">> New URL after redirect: {page.url}")
                 
                 # 4. HANDLE CLOUDFLARE (ROUND 2 - CRITICAL)
-                # We pass is_round_2=True to DISABLE the "Member Login" loop
-                print(">> Running Round 2 Bypass Check...")
-                bypass_success_2 = bypass_challenge(page, is_round_2=True)
-                
-                if not bypass_success_2:
-                    # One last chance: Check if we are actually ON the home page despite the spinner?
-                    if page.locator("button[data-id='extension']").count() > 0:
-                        print(">> Filters detected despite spinner. Proceeding...")
-                    else:
-                        page.screenshot(path="debug_block_round2.png", animations="disabled")
-                        raise Exception("Cloudflare blocked access (Round 2).")
+                # If we were sent to /captcha, we must solve it.
+                if "captcha" in page.url or "robot" in page.title().lower():
+                    print(">> Redirect triggered Cloudflare. Running Round 2 Bypass...")
+                    
+                    # We pass is_round_2=True to DISABLE the "Member Login" loop
+                    bypass_success_2 = bypass_challenge(page, is_round_2=True)
+                    
+                    if not bypass_success_2:
+                        # Final check: sometimes title says Robot but we are actually through
+                        if page.locator("button[data-id='extension']").count() > 0:
+                            print(">> Filters detected despite spinner. Proceeding...")
+                        else:
+                            page.screenshot(path="debug_block_round2.png", animations="disabled")
+                            raise Exception("Cloudflare blocked access (Round 2).")
 
-            
             # 5. HANDLE BANNER
             try:
-                # Look for the banner more aggressively
                 if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
                     print(">> Banner detected. Waiting...")
-                    # Wait for close button
                     page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
                     print(">> Banner closed.")
             except:
@@ -331,7 +347,7 @@ def main():
                 # Wait longer for filters to appear after potential redirect
                 page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             except:
-                print(">> ERROR: Filters not found. We might still be on the Challenge screen.")
+                print(">> ERROR: Filters not found. Taking screenshot...")
                 page.screenshot(path="debug_error_nofilters.png", animations="disabled")
                 raise Exception("Filters did not load.")
             
