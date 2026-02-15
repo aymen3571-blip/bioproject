@@ -12,60 +12,27 @@ from playwright.sync_api import sync_playwright
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
 
+# --- STEALTH FUNCTIONS ---
 def add_stealth_js(context):
-    """Injects JavaScript to hide automation properties from Cloudflare."""
+    """Injects JavaScript to hide automation properties."""
     context.add_init_script("""
-        // Overwrite the `webdriver` property
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-
-        // Mock chrome object
-        window.chrome = {
-            runtime: {}
-        };
-
-        // Mock plugins to look like a real Intel Mac or Windows PC
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-
-        // Mock languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     """)
 
 def human_mouse_move(page):
-    """Jiggles the mouse randomly to simulate human presence."""
+    """Jiggles the mouse randomly."""
     try:
-        for _ in range(random.randint(3, 5)):
-            x = random.randint(100, 800)
-            y = random.randint(100, 600)
-            page.mouse.move(x, y, steps=10)
+        for _ in range(random.randint(2, 4)):
+            page.mouse.move(random.randint(100, 800), random.randint(100, 600), steps=5)
             time.sleep(random.uniform(0.1, 0.3))
     except:
         pass
 
-def load_cookies(context):
-    if os.path.exists(COOKIES_FILE):
-        try:
-            with open(COOKIES_FILE, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict) and 'cookies' in data:
-                    cookies = data['cookies']
-                elif isinstance(data, list):
-                    cookies = data
-                else:
-                    return
-                context.add_cookies(cookies)
-            print(">> Cookies injected.")
-        except Exception as e:
-            print(f">> Cookie error: {e}")
-    else:
-        print(">> No cookie file found.")
-
 def get_price_via_ocr(cell_element):
+    """Reads the price visually using OCR."""
     try:
         png_bytes = cell_element.screenshot()
         image = Image.open(BytesIO(png_bytes))
@@ -74,80 +41,92 @@ def get_price_via_ocr(cell_element):
     except:
         return "OCR_ERROR"
 
+def load_cookies(context):
+    if os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, 'r') as f:
+                data = json.load(f)
+                cookies = data['cookies'] if isinstance(data, dict) and 'cookies' in data else data
+                context.add_cookies(cookies)
+            print(">> Cookies injected.")
+        except Exception as e:
+            print(f">> Cookie error: {e}")
+
 def main():
-    print(">> Starting DropDax Stealth Scraper...")
+    print(">> Starting DropDax Proxy Scraper...")
+    
+    # 1. SETUP PROXY FROM GITHUB SECRETS
+    # GitHub Action will pass this as an environment variable
+    proxy_url = os.environ.get("PROXY_URL") 
+    
+    launch_options = {
+        "headless": True,
+        "args": [
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox"
+        ]
+    }
+
+    if proxy_url:
+        print(">> PROXY DETECTED! Routing traffic through residential network...")
+        launch_options["proxy"] = {"server": proxy_url}
+    else:
+        print(">> No proxy found. Running on default IP (High Risk of Block).")
+
     with sync_playwright() as p:
-        # 1. LAUNCH WITH STEALTH ARGUMENTS
-        browser = p.chromium.launch(
-            headless=True,  # We use the args below to make it 'new' headless
-            args=[
-                "--headless=new", # The modern, stealthier headless mode
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-infobars",
-                "--window-size=1920,1080",
-                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            ]
-        )
+        browser = p.chromium.launch(**launch_options)
         
-        context = browser.new_context(
-            viewport={'width': 1920, 'height': 1080}
-        )
-        
-        # 2. INJECT STEALTH SCRIPTS
+        # Create context with standard viewport
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         add_stealth_js(context)
+        load_cookies(context)
         
         try:
-            load_cookies(context)
             page = context.new_page()
             
-            # 3. NAVIGATE SLOWLY
-            print(">> Navigating...")
-            page.goto("https://namebio.com/", timeout=60000, wait_until="domcontentloaded")
-            
-            # 4. CHECK FOR BLOCK
+            # 2. NAVIGATE
+            print(">> Connecting to NameBio...")
+            page.goto("https://namebio.com/", timeout=90000, wait_until="domcontentloaded")
             human_mouse_move(page)
-            time.sleep(3)
             
-            title = page.title()
-            print(f">> Page Title: {title}")
-            
-            if "blocked" in title.lower() or "cloudflare" in title.lower():
-                print(">> DETECTED BLOCK. Saving screenshot...")
-                page.screenshot(path="debug_block.png")
+            # Check for Block
+            if "blocked" in page.title().lower() or "cloudflare" in page.title().lower():
+                print(">> STILL BLOCKED. The proxy might be flagged or not working.")
+                page.screenshot(path="debug_block_proxy.png")
                 raise Exception("Cloudflare blocked access.")
 
-            # 5. BANNER LOGIC
+            # 3. HANDLE BANNER
             try:
                 if page.is_visible("#nudge-countdown-container"):
-                    print(">> Banner found. Waiting...")
+                    print(">> Banner detected. Waiting...")
                     page.wait_for_selector("#nudge-countdown-container a[data-dismiss='modal']", state="visible", timeout=45000)
                     time.sleep(1)
                     page.click("#nudge-countdown-container a[data-dismiss='modal']")
                     print(">> Banner closed.")
-            except Exception as e:
-                print(f">> Banner skipped: {e}")
+            except:
+                pass
 
-            # 6. FILTERS
+            # 4. APPLY FILTERS (The usual logic)
             print(">> Applying filters...")
-            page.wait_for_selector("button[data-id='extension']", state="attached", timeout=15000)
+            page.wait_for_selector("button[data-id='extension']", state="attached", timeout=20000)
             
-            # Extension
+            # Extension: .com
             page.click("button[data-id='extension']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('.com')")
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(1)
 
-            # Venue
+            # Venue: GoDaddy
             page.click("button[data-id='venue']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('GoDaddy')")
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(1)
 
-            # Date (Today)
+            # Date: Today
             page.click("button[data-id='date-range']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:nth-child(2) a")
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(1)
 
-            # Rows
+            # Rows: 25
             page.select_option("select[name='search-results_length']", "25")
             
             # Search
@@ -156,8 +135,7 @@ def main():
             page.wait_for_selector("#search-results tbody tr", state="visible", timeout=30000)
             time.sleep(3)
 
-            # 7. SCRAPE
-            print(">> Scraping...")
+            # 5. SCRAPE
             rows = page.query_selector_all("#search-results tbody tr")
             data = []
             
@@ -182,7 +160,7 @@ def main():
             print(f">> Success! {len(data)} rows saved.")
 
         except Exception as e:
-            print(f">> CRITICAL ERROR: {e}")
+            print(f">> ERROR: {e}")
             page.screenshot(path="debug_crash.png")
             raise e
         
