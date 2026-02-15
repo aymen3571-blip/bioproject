@@ -8,9 +8,6 @@ from urllib.parse import urlparse
 import subprocess
 
 # --- LIBRARY FIX ---
-# We REMOVE the external playwright-stealth import to stop the crashing.
-# We will inject the stealth logic manually below.
-
 import pytesseract
 from PIL import Image
 from io import BytesIO
@@ -22,82 +19,31 @@ OUTPUT_FILE = "namebio_data.csv"
 MAX_RETRIES = 3 
 
 # --- ADVANCED NATIVE STEALTH ---
-# This replaces the external library with specific hacks that Cloudflare looks for.
 def apply_advanced_stealth(page):
     """
     Injects specific JavaScript overrides to mask the bot.
-    Includes WebGL spoofing which is crucial for Cloudflare.
     """
-    
-    # 1. Mask the WebDriver flag (The #1 detection method)
     page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-    """)
-
-    # 2. Mock the Chrome Object (So it looks like Google Chrome, not a script)
-    page.add_init_script("""
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-    """)
-
-    # 3. Spoof WebGL Vendor (CRITICAL FOR CLOUDFLARE)
-    # Headless browsers usually show "Google SwiftShader" which is a dead giveaway.
-    # We force it to say "Intel Iris OpenGL" to look like a real laptop.
-    page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
         const getParameter = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            // 37445 = UNMASKED_VENDOR_WEBGL
-            if (parameter === 37445) {
-                return 'Intel Inc.';
-            }
-            // 37446 = UNMASKED_RENDERER_WEBGL
-            if (parameter === 37446) {
-                return 'Intel(R) Iris(TM) Plus Graphics 640';
-            }
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
             return getParameter(parameter);
         };
-    """)
-
-    # 4. Mock Plugins (Bots have 0 plugins, Humans have PDF viewers etc)
-    page.add_init_script("""
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-    """)
-
-    # 5. Fix Window Dimensions (Headless windows sometimes report 0)
-    page.add_init_script("""
-        Object.defineProperty(window, 'outerWidth', { value: window.innerWidth });
-        Object.defineProperty(window, 'outerHeight', { value: window.innerHeight });
-    """)
-
-    # 6. Mask Permissions
-    page.add_init_script("""
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
     """)
 
 def human_mouse_move(page):
     try:
         # Move mouse to random positions to simulate human 'hesitation'
-        for _ in range(random.randint(3, 5)):
+        for _ in range(random.randint(2, 4)):
             x = random.randint(100, 1000)
             y = random.randint(100, 800)
-            page.mouse.move(x, y, steps=25)
-            time.sleep(random.uniform(0.1, 0.4))
+            page.mouse.move(x, y, steps=10)
+            time.sleep(random.uniform(0.1, 0.3))
     except:
         pass
 
@@ -121,50 +67,56 @@ def load_cookies(context):
         except Exception as e:
             print(f">> Cookie error: {e}")
 
-# --- ENHANCED CLOUDFLARE BYPASS ---
+# --- ENHANCED CLOUDFLARE BYPASS (THE FIX) ---
 def bypass_challenge(page):
     print(">> CHECKING FOR CLOUDFLARE CHALLENGE...")
-    
     time.sleep(5)
     
-    # Look for frames that might contain the Turnstile widget
-    frames = page.frames
+    # 1. IDENTIFY THE FRAME
     turnstile_frame = None
-    
-    for frame in frames:
-        try:
-            if "cloudflare" in frame.url or "turnstile" in frame.url:
-                turnstile_frame = frame
-                print(f">> Found Turnstile Frame: {frame.url}")
-                break
-        except:
-            pass
-
+    for frame in page.frames:
+        if "cloudflare" in frame.url or "turnstile" in frame.url:
+            turnstile_frame = frame
+            print(f">> Found Turnstile Frame: {frame.url}")
+            break
+            
     if turnstile_frame:
         print(">> Attempting to click Turnstile Checkbox...")
         try:
-            # The checkbox is often a simple 'body' click inside that specific iframe
-            box = turnstile_frame.wait_for_selector("body", timeout=5000)
+            # METHOD A: Geometry Click (Most Reliable)
+            # We find where the frame is on the screen and click the exact center
+            box = turnstile_frame.frame_element().bounding_box()
             if box:
-                human_mouse_move(page)
-                box.click()
-                print(">> Clicked Turnstile widget.")
-                time.sleep(5)
+                print(f">> Frame detected at X={box['x']}, Y={box['y']}")
+                # Calculate center of the widget
+                click_x = box['x'] + (box['width'] / 2)
+                click_y = box['y'] + (box['height'] / 2)
+                
+                # Move mouse there slowly
+                page.mouse.move(click_x, click_y, steps=20)
+                time.sleep(0.5)
+                page.mouse.click(click_x, click_y)
+                print(">> Clicked via Coordinates.")
+            else:
+                # METHOD B: Selector Click (Fallback)
+                print(">> Coordinates failed. Trying selector...")
+                turnstile_frame.click("body", force=True)
+                
+            time.sleep(2)
         except Exception as e:
-            print(f">> Failed to click Turnstile: {e}")
+            print(f">> Click failed: {e}")
 
-    # General check: If we are still on the "Just a moment" or "Robot" screen
+    # 2. WAIT FOR SOLVE
     title = page.title().lower()
     if "robot" in title or "moment" in title or "attention" in title:
-        print(">> Still stuck on Challenge. Waiting 15s for auto-solve...")
-        time.sleep(15)
+        print(">> Waiting 10s for Cloudflare to process...")
+        time.sleep(10)
         
-        # Final check
         if "robot" not in page.title().lower():
             print(">> SUCCESS! Challenge bypassed.")
             return True
         else:
-            print(">> FAILED: Still stuck on challenge screen.")
+            print(">> FAILED: Still stuck. Taking screenshot.")
             return False
     
     print(">> No challenge detected (or passed automatically).")
@@ -177,7 +129,6 @@ def connect_with_retries(page, url, retries=3):
             # Use 'domcontentloaded' to return faster
             page.goto(url, timeout=90000, wait_until="domcontentloaded") 
             
-            # Check for immediate chrome error (proxy failure)
             if "chrome-error" in page.url:
                 raise Exception("Proxy dropped connection (Chrome Error).")
 
@@ -192,13 +143,11 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Native Stealth)...")
+    print(">> Starting DropDax Proxy Scraper (Final Headful Edition)...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
     launch_options = {
-        # IMPORTANT: We use headless=False because we are running in xvfb (Virtual Screen).
-        # Cloudflare hates 'headless=True'.
         "headless": False, 
         "args": [
             "--no-sandbox",
@@ -236,8 +185,6 @@ def main():
         
         try:
             page = context.new_page()
-            
-            # APPLY THE ADVANCED STEALTH
             apply_advanced_stealth(page)
 
             # 1. LOGIN & CONNECT
@@ -254,10 +201,8 @@ def main():
 
             # 3. HANDLE BANNER
             try:
-                # Look for the banner more aggressively
                 if page.locator("#nudge-countdown-container").is_visible(timeout=5000):
                     print(">> Banner detected. Waiting...")
-                    # Wait for close button
                     page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
                     print(">> Banner closed.")
             except:
