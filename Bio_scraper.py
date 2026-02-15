@@ -6,12 +6,12 @@ import random
 import pytesseract
 from PIL import Image
 from io import BytesIO
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-MAX_RETRIES = 3  # How many times to try connecting
+MAX_RETRIES = 3 
 
 # --- STEALTH FUNCTIONS ---
 def add_stealth_js(context):
@@ -52,15 +52,15 @@ def load_cookies(context):
             print(f">> Cookie error: {e}")
 
 def connect_with_retries(page, url, retries=3):
-    """Tries to load the page. If it fails, it refreshes and tries again."""
+    """Tries to load the page with extended timeouts."""
     for attempt in range(1, retries + 1):
         try:
             print(f">> Connection Attempt {attempt}/{retries}...")
-            # 'commit' is faster than 'domcontentloaded'. We wait for selectors later.
-            page.goto(url, timeout=60000, wait_until="commit") 
+            # Increased timeout to 90 seconds for slow proxies
+            page.goto(url, timeout=90000, wait_until="commit") 
             
-            # Now wait for the body to ensure actual load
-            page.wait_for_selector("body", timeout=30000)
+            # Wait for body (Success indicator)
+            page.wait_for_selector("body", timeout=60000)
             print(">> Page loaded successfully.")
             return True
         except Exception as e:
@@ -73,7 +73,7 @@ def connect_with_retries(page, url, retries=3):
     return False
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Robust Mode)...")
+    print(">> Starting DropDax Proxy Scraper...")
     
     proxy_url = os.environ.get("PROXY_URL") 
     
@@ -88,6 +88,9 @@ def main():
 
     if proxy_url:
         print(">> PROXY DETECTED.")
+        # Print masked proxy to debug format issues
+        masked_proxy = proxy_url.replace(proxy_url.split(":")[2].split("@")[0], "****")
+        print(f">> Using Proxy: {masked_proxy}")
         launch_options["proxy"] = {"server": proxy_url}
     else:
         print(">> No proxy found. Running on default IP.")
@@ -96,14 +99,24 @@ def main():
         browser = p.chromium.launch(**launch_options)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         add_stealth_js(context)
-        load_cookies(context)
         
         try:
             page = context.new_page()
+
+            # 1. TEST PROXY CONNECTION FIRST
+            print(">> Testing Proxy Connection (ipify)...")
+            try:
+                page.goto("https://api.ipify.org?format=json", timeout=30000)
+                content = page.content()
+                print(f">> Proxy is working! IP Info: {page.inner_text('body')}")
+            except Exception as e:
+                print(f">> WARNING: Proxy test failed. URL format might be wrong. Error: {e}")
+
+            # 2. LOGIN & CONNECT
+            load_cookies(context)
             
-            # 1. ROBUST CONNECTION
             if not connect_with_retries(page, "https://namebio.com/"):
-                raise Exception("Failed to connect to NameBio after multiple retries.")
+                raise Exception("Failed to connect to NameBio. Check Proxy URL.")
             
             human_mouse_move(page)
             
@@ -111,12 +124,11 @@ def main():
             title = page.title()
             print(f">> Page Title: {title}")
             if "blocked" in title.lower() or "cloudflare" in title.lower():
-                print(">> BLOCKED. Taking screenshot...")
-                # 'animations="disabled"' prevents the font-wait crash
+                print(">> BLOCKED. Saving screenshot...")
                 page.screenshot(path="debug_block_proxy.png", animations="disabled")
                 raise Exception("Cloudflare blocked access.")
 
-            # 2. HANDLE BANNER
+            # 3. HANDLE BANNER
             try:
                 if page.is_visible("#nudge-countdown-container"):
                     print(">> Banner detected. Waiting...")
@@ -127,30 +139,29 @@ def main():
             except:
                 pass
 
-            # 3. APPLY FILTERS
+            # 4. APPLY FILTERS
             print(">> Applying filters...")
-            # We wait longer here because proxies can be laggy
-            page.wait_for_selector("button[data-id='extension']", state="attached", timeout=30000)
+            page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
             
             page.click("button[data-id='extension']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('.com')")
-            time.sleep(1)
+            time.sleep(2)
 
             page.click("button[data-id='venue']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('GoDaddy')")
-            time.sleep(1)
+            time.sleep(2)
 
             page.click("button[data-id='date-range']")
             page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:nth-child(2) a")
-            time.sleep(1)
+            time.sleep(2)
 
             page.select_option("select[name='search-results_length']", "25")
             
-            # 4. SEARCH & SCRAPE
+            # 5. SCRAPE
             print(">> Clicking Search...")
             page.click("#search-submit")
-            page.wait_for_selector("#search-results tbody tr", state="visible", timeout=40000)
-            time.sleep(5) # Extra sleep for fonts on slow proxy
+            page.wait_for_selector("#search-results tbody tr", state="visible", timeout=60000)
+            time.sleep(5) 
 
             rows = page.query_selector_all("#search-results tbody tr")
             data = []
@@ -161,7 +172,6 @@ def main():
                 if len(cols) < 4: continue
 
                 domain = cols[0].inner_text().strip()
-                # Pass element to OCR function
                 price = get_price_via_ocr(cols[1]).replace("USD", "").replace("$", "").strip()
                 date = cols[2].inner_text().strip()
                 venue = cols[3].inner_text().strip()
@@ -181,7 +191,7 @@ def main():
             try:
                 page.screenshot(path="debug_crash.png", animations="disabled")
             except:
-                print(">> Could not take crash screenshot.")
+                pass
             raise e
         
         browser.close()
