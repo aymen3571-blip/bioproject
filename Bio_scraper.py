@@ -1,7 +1,6 @@
 import os
 import csv
 import time
-import random
 import json
 import shutil
 import pytesseract
@@ -16,13 +15,14 @@ OUTPUT_FILE = "namebio_data.csv"
 
 # --- PROXY AUTH EXTENSION GENERATOR ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
+    """Creates a temporary Chrome extension to handle Proxy Authentication."""
     try:
         parsed = urlparse(proxy_string)
         username = parsed.username
         password = parsed.password
         host = parsed.hostname
         port = parsed.port
-        scheme = parsed.scheme
+        scheme = parsed.scheme or "http"
 
         if not username or not password:
             return None
@@ -109,106 +109,85 @@ def get_price_via_ocr(ele):
 def safe_screenshot(page, name):
     try:
         page.get_screenshot(path=name)
+        print(f"   [Snapshot] Saved to {name}")
     except:
         pass
 
-def check_for_hard_block(page):
-    """Checks if we are on the 'Sorry, you have been blocked' page."""
-    # Check title and content for block messages
+def bypass_turnstile(page):
+    print(">> Checking for Cloudflare Turnstile...")
+    time.sleep(3)
+    
+    # Quick check for Hard Block
     if "blocked" in page.title.lower() or "security service" in page.html.lower():
         print(">> CRITICAL: Detected Hard Block (Firewall Ban).")
         safe_screenshot(page, "debug_hard_block.png")
-        return True
-    return False
-
-def bypass_turnstile(page):
-    print(">> Checking for Cloudflare Turnstile...")
-    time.sleep(5)
-    
-    if check_for_hard_block(page):
         return False
 
     if "Just a moment" not in page.title and "robot" not in page.title.lower():
         print(">> No challenge detected.")
         return True
 
-    print(">> Challenge Detected! Scanning for widget...")
+    print(">> Challenge Detected! Scanning...")
     
-    for i in range(30):
+    # Try for 25 seconds
+    for i in range(25):
         try:
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
                 print(">> SUCCESS! Challenge passed.")
                 return True
 
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
-            
             if iframe:
-                print(f">> Found Turnstile Iframe. Attempting click... ({i}s)")
                 body = iframe.ele('tag:body', timeout=2)
                 if body:
+                    print(f">> Clicking Turnstile... ({i}s)")
                     body.click(by_js=False) 
                     time.sleep(2)
             time.sleep(1)
         except:
             pass
             
-    if "Just a moment" in page.title:
-        print(">> FAILED: Cloudflare stuck.")
-        return False
-        
-    return True
+    return False
 
 def apply_filters(page):
     print(">> Applying Search Filters...")
-    
     try:
-        # Check if we are blocked before trying filters
-        if check_for_hard_block(page):
-             raise Exception("Hard Block detected before filters.")
-
         # 1. Extension -> .com
-        ext_btn = page.ele('css:button[data-id="extension"]', timeout=10)
+        ext_btn = page.ele('css:button[data-id="extension"]', timeout=5)
         if not ext_btn:
-             # Double check for block
-             if check_for_hard_block(page):
-                 raise Exception("Hard Block detected.")
-             
-             # Check if we are on the wrong page (Dashboard)
+             # Check if we were redirected to Dashboard
              if "account" in page.url or "dashboard" in page.url:
-                 print(">> Wrong Page (Dashboard). Redirecting...")
-                 return False # Signal to retry navigation
-                 
+                 print(">> Filters not found (We are on Dashboard).")
+                 return False
+             
              safe_screenshot(page, "debug_no_filters.png")
-             raise Exception("Extension button not found.")
+             raise Exception("Filters did not load.")
         
         ext_btn.click()
         time.sleep(0.5)
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
         time.sleep(1)
-        print("   -> Extension set to .com")
+        print("   -> Extension: .com")
 
         # 2. Venue -> GoDaddy
-        venue_btn = page.ele('css:button[data-id="venue"]')
-        venue_btn.click()
+        page.ele('css:button[data-id="venue"]').click()
         time.sleep(0.5)
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
         time.sleep(1)
-        print("   -> Venue set to GoDaddy")
+        print("   -> Venue: GoDaddy")
 
         # 3. Date -> Today
-        date_btn = page.ele('css:button[data-id="date-range"]')
-        date_btn.click()
+        page.ele('css:button[data-id="date-range"]').click()
         time.sleep(0.5)
         date_options = page.eles('xpath://div[contains(@class, "open")]//ul/li')
         if len(date_options) > 1:
             date_options[1].click()
-            print("   -> Date set to Today")
+            print("   -> Date: Today")
         time.sleep(1)
 
         # 4. Rows -> 25
-        sel = page.ele('css:select[name="search-results_length"]')
-        sel.select('25')
-        print("   -> Rows set to 25")
+        page.ele('css:select[name="search-results_length"]').select('25')
+        print("   -> Rows: 25")
         time.sleep(2)
         
         return True
@@ -216,10 +195,10 @@ def apply_filters(page):
     except Exception as e:
         print(f">> Error applying filters: {e}")
         safe_screenshot(page, "debug_filter_error.png")
-        raise e
+        return False
 
 def main():
-    print(">> Starting DropDax Scraper (DrissionPage Stealth V2)...")
+    print(">> Starting DropDax Scraper (Professional Diagnostic Mode)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     
@@ -234,21 +213,26 @@ def main():
         else:
             co.set_proxy(proxy_url)
     
-    # 2. STEALTH ARGUMENTS
+    # 2. PROFESSIONAL STEALTH ARGUMENTS
+    # We remove the specific user-agent to let Chrome match the binary version naturally
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--lang=en-US')
-    # Removes the "Automated" flag
     co.set_argument('--disable-blink-features=AutomationControlled') 
-    # Latest Chrome User Agent (v124)
-    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
-
+    
+    # Explicitly set browser path
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
     page = ChromiumPage(addr_or_opts=co)
     
     try:
+        # --- PRE-FLIGHT CHECK (CRITICAL) ---
+        print(">> Running Pre-Flight IP Diagnostic...")
+        # We visit a neutral site to verify the proxy is working
+        page.get("https://api.ipify.org")
+        print(f">> Current Public IP: {page.ele('tag:body').text}")
+        
         # --- LOGIN VIA COOKIES ---
         print(">> Injecting Cookies...")
         if os.path.exists(COOKIES_FILE):
@@ -261,34 +245,20 @@ def main():
         
         # --- NAVIGATE ---
         print(">> Navigating to NameBio...")
+        page.set.window.max() # Maximize window to look "Human"
         page.get("https://namebio.com/")
         
         # --- CHECK BLOCKS ---
-        if check_for_hard_block(page):
-            # FIXED: Correct way to clear cookies in DrissionPage
-            print(">> Cookies caused a ban. Clearing cookies and retrying...")
-            try:
-                page.run_cdp('Network.clearBrowserCookies')
-                page.run_cdp('Network.clearBrowserCache')
-            except:
-                # Fallback if CDP fails
-                page.set.cookies.clear()
-            
-            # Refresh to try again without cookies
-            print(">> Retrying navigation clean...")
-            page.get("https://namebio.com/")
-            time.sleep(5)
-        
         if not bypass_turnstile(page):
-            safe_screenshot(page, "debug_cloudflare_fail.png")
-            raise Exception("Could not bypass Cloudflare.")
+            raise Exception("Cloudflare blocked access.")
 
         # --- DASHBOARD REDIRECT ---
         if "/account" in page.url or "dashboard" in page.url:
             print(">> Landed on Dashboard. Redirecting to Home...")
             page.get("https://namebio.com/")
             time.sleep(5)
-            bypass_turnstile(page)
+            if not bypass_turnstile(page):
+                 raise Exception("Blocked on Redirect.")
 
         # --- BANNER ---
         try:
@@ -304,10 +274,12 @@ def main():
         # --- APPLY FILTERS ---
         success = apply_filters(page)
         if not success:
-             print(">> Retry: Navigating Home again...")
-             page.get("https://namebio.com/")
+             print(">> Retry: Reloading Page...")
+             page.refresh()
              time.sleep(5)
-             apply_filters(page)
+             bypass_turnstile(page)
+             if not apply_filters(page):
+                 raise Exception("Filters failed to load after retry.")
 
         # --- SEARCH ---
         print(">> Clicking Search...")
