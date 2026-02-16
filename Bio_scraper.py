@@ -3,14 +3,107 @@ import csv
 import time
 import random
 import json
+import shutil
 import pytesseract
 from PIL import Image
 from io import BytesIO
+from urllib.parse import urlparse
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
+
+# --- PROXY AUTH EXTENSION GENERATOR ---
+def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
+    """
+    Creates a temporary Chrome extension to handle Proxy Authentication.
+    DrissionPage/Chrome cannot handle user:pass@host directly.
+    """
+    try:
+        # Parse the proxy URL
+        parsed = urlparse(proxy_string)
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port
+        scheme = parsed.scheme
+
+        if not username or not password:
+            print(">> Proxy does not have authentication. Using standard method.")
+            return None
+
+        # Clean up old plugin if exists
+        if os.path.exists(plugin_dir):
+            shutil.rmtree(plugin_dir)
+        os.makedirs(plugin_dir)
+
+        # 1. Create manifest.json
+        manifest_json = """
+        {
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Chrome Proxy Auth",
+            "permissions": [
+                "proxy",
+                "tabs",
+                "unlimitedStorage",
+                "storage",
+                "<all_urls>",
+                "webRequest",
+                "webRequestBlocking"
+            ],
+            "background": {
+                "scripts": ["background.js"]
+            },
+            "minimum_chrome_version": "22.0.0"
+        }
+        """
+
+        # 2. Create background.js
+        background_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "{scheme}",
+                    host: "{host}",
+                    port: parseInt({port})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+
+        function callbackFn(details) {{
+            return {{
+                authCredentials: {{
+                    username: "{username}",
+                    password: "{password}"
+                }}
+            }};
+        }}
+
+        chrome.webRequest.onAuthRequired.addListener(
+            callbackFn,
+            {{urls: ["<all_urls>"]}},
+            ['blocking']
+        );
+        """
+
+        with open(os.path.join(plugin_dir, "manifest.json"), "w") as f:
+            f.write(manifest_json)
+        
+        with open(os.path.join(plugin_dir, "background.js"), "w") as f:
+            f.write(background_js)
+
+        print(f">> Created Proxy Auth Plugin for {host}:{port}")
+        return os.path.abspath(plugin_dir)
+
+    except Exception as e:
+        print(f">> Failed to create proxy plugin: {e}")
+        return None
 
 # --- HELPER FUNCTIONS ---
 
@@ -26,6 +119,13 @@ def get_price_via_ocr(ele):
     except Exception as e:
         print(f"   [OCR Error] {e}")
         return "OCR_ERROR"
+
+def safe_screenshot(page, name):
+    """Safely takes a screenshot without crashing on timeout."""
+    try:
+        page.get_screenshot(path=name)
+    except Exception as e:
+        print(f">> Could not take screenshot {name}: {e}")
 
 def bypass_turnstile(page):
     """
@@ -136,7 +236,7 @@ def apply_filters(page):
 
     except Exception as e:
         print(f">> Error applying filters: {e}")
-        page.get_screenshot(path="debug_filter_error.png")
+        safe_screenshot(page, "debug_filter_error.png")
         raise e
 
 def main():
@@ -147,19 +247,25 @@ def main():
     # --- SETUP CHROMIUM OPTIONS ---
     co = ChromiumOptions()
     
-    # 1. Set Proxy
+    # 1. SETUP PROXY (Using Extension Method)
     if proxy_url:
-        print(">> PROXY DETECTED.")
-        # DrissionPage format: http://user:pass@ip:port
-        co.set_proxy(proxy_url)
+        print(">> PROXY DETECTED. Generating Auth Extension...")
+        auth_plugin_path = create_proxy_auth_extension(proxy_url)
+        
+        if auth_plugin_path:
+            # Add the extension that handles User/Pass
+            co.add_extension(auth_plugin_path)
+        else:
+            # Fallback for simple IPs (no password)
+            co.set_proxy(proxy_url)
     
     # 2. Set Arguments for GitHub Actions
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
+    co.set_argument('--disable-dev-shm-usage') # Prevents crashes in docker
     co.set_argument('--lang=en-US')
     
     # 3. Explicitly set browser path for GHA
-    # Standard location on ubuntu-latest
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
     # Initialize Page
@@ -171,11 +277,9 @@ def main():
         if os.path.exists(COOKIES_FILE):
             with open(COOKIES_FILE, 'r') as f:
                 cookies = json.load(f)
-                # DrissionPage handles list of dicts easily
                 if isinstance(cookies, dict) and 'cookies' in cookies:
                     cookies = cookies['cookies']
                 
-                # Convert to DrissionPage format if needed, but it usually accepts list of dicts
                 for cookie in cookies:
                     page.set.cookies(cookie)
         else:
@@ -187,6 +291,7 @@ def main():
         
         # --- CLOUDFLARE CHECK ---
         if not bypass_turnstile(page):
+            safe_screenshot(page, "debug_cloudflare_fail.png")
             raise Exception("Could not bypass Cloudflare.")
 
         # --- DASHBOARD CHECK ---
@@ -259,11 +364,14 @@ def main():
 
     except Exception as e:
         print(f">> ERROR: {e}")
-        page.get_screenshot(path="debug_crash.png")
+        safe_screenshot(page, "debug_crash.png")
         raise e
     
     finally:
         page.quit()
+        # Clean up the temp plugin
+        if os.path.exists("proxy_auth_plugin"):
+            shutil.rmtree("proxy_auth_plugin", ignore_errors=True)
 
 if __name__ == "__main__":
     main()
