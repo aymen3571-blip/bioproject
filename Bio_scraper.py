@@ -114,6 +114,7 @@ def safe_screenshot(page, name):
 
 def check_for_hard_block(page):
     """Checks if we are on the 'Sorry, you have been blocked' page."""
+    # Check title and content for block messages
     if "blocked" in page.title.lower() or "security service" in page.html.lower():
         print(">> CRITICAL: Detected Hard Block (Firewall Ban).")
         safe_screenshot(page, "debug_hard_block.png")
@@ -218,7 +219,7 @@ def apply_filters(page):
         raise e
 
 def main():
-    print(">> Starting DropDax Scraper (DrissionPage Stealth)...")
+    print(">> Starting DropDax Scraper (DrissionPage Stealth V2)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     
@@ -233,15 +234,15 @@ def main():
         else:
             co.set_proxy(proxy_url)
     
-    # 2. STEALTH ARGUMENTS (CRITICAL FOR HARD BLOCK)
+    # 2. STEALTH ARGUMENTS
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--lang=en-US')
-    # Removes the "Automated" flag that triggers firewalls
+    # Removes the "Automated" flag
     co.set_argument('--disable-blink-features=AutomationControlled') 
-    # Random User Agent to look like a real Windows PC
-    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+    # Latest Chrome User Agent (v124)
+    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
 
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
@@ -264,9 +265,17 @@ def main():
         
         # --- CHECK BLOCKS ---
         if check_for_hard_block(page):
-            # If cookies got us banned, clear them and try fresh
+            # FIXED: Correct way to clear cookies in DrissionPage
             print(">> Cookies caused a ban. Clearing cookies and retrying...")
-            page.clear_cookies()
+            try:
+                page.run_cdp('Network.clearBrowserCookies')
+                page.run_cdp('Network.clearBrowserCache')
+            except:
+                # Fallback if CDP fails
+                page.set.cookies.clear()
+            
+            # Refresh to try again without cookies
+            print(">> Retrying navigation clean...")
             page.get("https://namebio.com/")
             time.sleep(5)
         
@@ -295,7 +304,6 @@ def main():
         # --- APPLY FILTERS ---
         success = apply_filters(page)
         if not success:
-             # Retry once if we were on the dashboard
              print(">> Retry: Navigating Home again...")
              page.get("https://namebio.com/")
              time.sleep(5)
