@@ -2,7 +2,7 @@ name: DropDax NameBio Scraper (FlareSolverr)
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Run every 30 mins to catch new sales
+    - cron: '*/30 * * * *' # Runs every 30 minutes
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
-    # --- THIS IS THE MAGIC SAUCE ---
+    # Service Container
     services:
       flaresolverr:
         image: flaresolverr/flaresolverr:latest
@@ -21,7 +21,8 @@ jobs:
         environment:
           LOG_LEVEL: info
           TZ: America/New_York
-    # -------------------------------
+          # Improve stability on CI environments
+          CAPTCHA_SOLVER: none 
 
     steps:
       - name: Checkout Code
@@ -32,23 +33,30 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install Dependencies
-      - name: Install Python Libraries
+      - name: Install Dependencies
         run: |
           pip install requests beautifulsoup4
 
-      # 2. Run Scraper (No XVFB needed!)
+      # --- CRITICAL FIX: WAIT FOR FLARESOLVERR ---
+      - name: Wait for FlareSolverr
+        run: |
+          echo "Waiting for FlareSolverr to start..."
+          timeout 30s bash -c 'until curl -s http://localhost:8191/health > /dev/null; do sleep 2; done'
+          echo "FlareSolverr is UP!"
+
+      # Run the Python Scraper
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: python Bio_scraper.py
 
-      # 3. Commit Results
+      # Commit Results
       - name: Commit and Push
         if: success()
         run: |
           git config --global user.name "DropDax Bot"
           git config --global user.email "bot@dropdax.com"
           git add namebio_data.csv
+          # Only commit if file changed
           git commit -m "Update NameBio Data [$(date)]" || echo "No changes to commit"
           git push
