@@ -1,46 +1,55 @@
 import os
 import csv
+import sys
 import time
 import json
-import sys
-import tls_client
 from urllib.parse import urlparse
 
 # --- CONFIGURATION ---
 OUTPUT_FILE = "namebio_data.csv"
 PROXY_URL = os.environ.get("PROXY_URL")
 
-# --- PARSE PROXY ---
+def init_csv():
+    """Creates the CSV file immediately to prevent Git errors."""
+    with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Domain", "Price", "Date", "Venue"])
+    print(f">> Initialized {OUTPUT_FILE}")
+
 def get_proxy_string():
     if not PROXY_URL: return None
     try:
         parsed = urlparse(PROXY_URL)
-        # tls_client format: http://user:pass@host:port
         return f"http://{parsed.username}:{parsed.password}@{parsed.hostname}:{parsed.port}"
     except:
         return None
 
 def main():
-    print(">> Starting DropDax API Scraper (TLS-Client)...")
+    print(">> Starting DropDax API Scraper (Robust Mode)...")
+    
+    # 0. INITIALIZE FILE
+    init_csv()
 
-    # 1. INITIALIZE CLIENT (Spoofing Chrome 120 on Windows)
+    # 1. IMPORT TLS_CLIENT (Handle missing dependency error)
+    try:
+        import tls_client
+    except ImportError as e:
+        print(">> FATAL: 'tls_client' or 'typing_extensions' missing.")
+        print(">> Please ensure your workflow installs: pip install requests tls_client typing_extensions")
+        sys.exit(1)
+
+    # 2. SETUP SESSION
     session = tls_client.Session(
         client_identifier="chrome_120",
         random_tls_extension_order=True
     )
 
-    # 2. CONFIGURE PROXY
     proxy_str = get_proxy_string()
     if proxy_str:
         print(f">> Proxy Configured: {proxy_str.split('@')[1]}")
-        session.proxies = {
-            "http": proxy_str,
-            "https": proxy_str
-        }
-    else:
-        print(">> WARNING: No Proxy Detected. Running Locally.")
+        session.proxies = {"http": proxy_str, "https": proxy_str}
 
-    # 3. SET HEADERS (Mimic Real Browser)
+    # 3. HEADERS
     headers = {
         "Host": "namebio.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -49,44 +58,26 @@ def main():
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://namebio.com",
         "Referer": "https://namebio.com/",
-        "X-Requested-With": "XMLHttpRequest",  # CRITICAL: Tells server it's an AJAX request
-        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
+        "X-Requested-With": "XMLHttpRequest",
     }
 
-    # 4. PREPARE PAYLOAD (The Search Parameters)
-    # This matches your filters: .com, GoDaddy, Last Sold (Date)
+    # 4. PAYLOAD
     payload = {
         "draw": "1",
-        "columns[0][data]": "domain",
-        "columns[0][name]": "domain",
-        "columns[1][data]": "price",
-        "columns[1][name]": "price",
-        "columns[2][data]": "date",
-        "columns[2][name]": "date",
-        "columns[3][data]": "venue",
-        "columns[3][name]": "venue",
         "start": "0",
-        "length": "25",  # 25 rows
+        "length": "25",
         "search[value]": "",
         "search[regex]": "false",
-        "placement": "all",
-        "tld[]": "com",        # FILTER: .com
-        "venue[]": "godaddy",  # FILTER: GoDaddy
-        "date_start": "today", # FILTER: Today (Dynamic)
+        "tld[]": "com",
+        "venue[]": "godaddy",
+        "date_start": "today",
         "date_end": "today",
-        "order[0][column]": "2", # Sort by Date
+        "order[0][column]": "2",
         "order[0][dir]": "desc"
     }
 
     try:
-        # 5. EXECUTE REQUEST
         print(">> Sending API Request...")
-        # NameBio uses this endpoint for the table data
         response = session.post(
             "https://namebio.com/jm-ajax/search",
             headers=headers,
@@ -95,25 +86,21 @@ def main():
         )
 
         print(f">> Status Code: {response.status_code}")
-        
-        # 6. HANDLE RESPONSE
+
         if response.status_code == 200:
             try:
                 json_data = response.json()
-                
-                # Check for "Error" in JSON (Soft Block)
-                if "error" in json_data and json_data["error"]:
-                    print(f">> API Error: {json_data['error']}")
-                    sys.exit(1)
-
                 rows = json_data.get("data", [])
+                
+                if not rows:
+                    print(">> Success, but 0 records found for today.")
+                    return # Exit cleanly, file is already created (empty)
+
                 print(f">> Success! Found {len(rows)} records.")
                 
-                # 7. SAVE TO CSV
                 clean_data = []
                 for row in rows:
-                    # Parse the raw HTML snippet in the JSON
-                    domain = row.get('domain', '').split('<')[0].strip() # Clean HTML tags if present
+                    domain = row.get('domain', '').split('<')[0].strip()
                     price = row.get('price', '').replace('$', '').replace(',', '').strip()
                     date = row.get('date', '')
                     venue = row.get('venue', '')
@@ -121,26 +108,20 @@ def main():
                     print(f"   + {domain} | ${price}")
                     clean_data.append([domain, price, date, venue])
 
-                with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+                # Append data to the file we created
+                with open(OUTPUT_FILE, 'a', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Domain", "Price", "Date", "Venue"])
                     writer.writerows(clean_data)
                 
-                print(f">> Saved to {OUTPUT_FILE}")
-
             except json.JSONDecodeError:
-                # If not JSON, it's likely a Cloudflare Challenge Page (HTML)
-                print(">> FAILED: Received HTML instead of JSON (Cloudflare Block).")
-                # Debug: Print first 200 chars to confirm
-                print(f">> Response Snippet: {response.text[:200]}")
-                sys.exit(1)
+                print(">> ERROR: Received HTML (Cloudflare Block).")
+                print(">> DUMPING RESPONSE BODY FOR DEBUG:")
+                print(response.text[:500]) # Print first 500 chars to identify the block
+                sys.exit(1) # Fail the build
         
-        elif response.status_code == 403:
-            print(">> CRITICAL: 403 Forbidden (Cloudflare Hard Block).")
-            sys.exit(1)
-            
         else:
             print(f">> ERROR: Unexpected Status {response.status_code}")
+            sys.exit(1)
 
     except Exception as e:
         print(f">> FATAL ERROR: {e}")
