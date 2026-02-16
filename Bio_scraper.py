@@ -5,7 +5,10 @@ import json
 import shutil
 import sys
 import random
-import requests
+import math
+import pytesseract
+from PIL import Image
+from io import BytesIO
 from urllib.parse import urlparse
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -18,10 +21,8 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
     try:
         parsed = urlparse(proxy_string)
         if not parsed.username or not parsed.password: return None
-        
         if os.path.exists(plugin_dir): shutil.rmtree(plugin_dir)
         os.makedirs(plugin_dir)
-
         manifest_json = """
         {
             "version": "1.0.0",
@@ -57,184 +58,148 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         return os.path.abspath(plugin_dir)
     except: return None
 
-def get_cookies_via_cdp(proxy_url):
-    print(">> PHASE 1: Harvesting Cookies via CDP (Direct Engine Access)...")
+def human_mouse_move(page):
+    """Simulates realistic human mouse movement to trick Cloudflare."""
+    print("   > Simulating Human Mouse Jiggle...")
+    width, height = 1920, 1080
+    for _ in range(5):
+        x = random.randint(100, width - 100)
+        y = random.randint(100, height - 100)
+        page.run_js(f"""
+            var event = new MouseEvent('mousemove', {{
+                'view': window,
+                'bubbles': true,
+                'cancelable': true,
+                'clientX': {x},
+                'clientY': {y}
+            }});
+            document.dispatchEvent(event);
+        """)
+        time.sleep(random.uniform(0.1, 0.3))
+
+def get_price_via_ocr(ele):
+    try:
+        png_bytes = ele.get_screenshot(as_bytes=True)
+        image = Image.open(BytesIO(png_bytes))
+        text = pytesseract.image_to_string(image, config='--psm 7').strip()
+        return text
+    except: return "OCR_ERROR"
+
+def main():
+    print(">> Starting DropDax 'Human Emulator' Scraper...")
+    proxy_url = os.environ.get("PROXY_URL")
     plugin_path = create_proxy_auth_extension(proxy_url) if proxy_url else None
     
     co = ChromiumOptions()
     if plugin_path: co.add_extension(plugin_path)
     
+    # CRITICAL: Force non-headless-looking flags
     co.set_argument(f'--user-agent={UA_LINUX}')
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--lang=en-US')
+    co.set_argument('--start-maximized') 
     co.set_argument('--disable-blink-features=AutomationControlled')
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
     page = ChromiumPage(addr_or_opts=co)
     
     try:
-        print(">> Navigating to NameBio...")
-        page.get("https://namebio.com/")
+        # 1. NAVIGATION
+        print(">> Navigating to NameBio (Last Sold)...")
+        # Direct link to the data page, skipping homepage
+        page.get("https://namebio.com/last-sold")
         
-        print(">> Waiting for Cloudflare Challenge...")
-        time.sleep(5)
-        
-        # Cloudflare Solver Loop
-        for i in range(15):
-            title = page.title.lower()
-            if "blocked" in title:
-                print(">> BROWSER BLOCKED. Retrying...")
-                return None
-            
-            if "just a moment" not in title and "robot" not in title:
-                print(">> SUCCESS: Challenge Passed!")
-                break
-                
-            iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=1)
-            if iframe:
-                print(f"   > Clicking Turnstile... ({i})")
-                try: iframe.ele('tag:body').click()
-                except: pass
+        # 2. THE LONG WAIT (Trust Score Building)
+        print(">> Waiting 20s for Cloudflare Trust Score...")
+        # While waiting, we "jiggle" the mouse
+        for i in range(10):
             time.sleep(2)
-        else:
-            print(">> FAILED: Timeout waiting for challenge.")
-            return None
-
-        # --- THE NUCLEAR OPTION: CDP COOKIE EXTRACTION ---
-        print(">> Executing CDP 'Network.getCookies'...")
-        # This talks directly to Chrome Engine, bypassing all wrappers
-        cookies_obj = page.run_cdp('Network.getCookies')
-        
-        if not cookies_obj or 'cookies' not in cookies_obj:
-            print(">> ERROR: CDP returned no cookies.")
-            return None
+            human_mouse_move(page)
             
-        raw_list = cookies_obj['cookies']
-        print(f">> Cookies Secured: {len(raw_list)} found via CDP.")
+            # Check if we passed
+            if "blocked" not in page.title.lower() and "just a moment" not in page.title.lower():
+                # Verify we see the table
+                if page.ele('#search-results', timeout=1):
+                    print(">> SUCCESS! Table detected early.")
+                    break
         
-        # Convert to simple dict for requests
-        cookie_dict = {}
-        for c in raw_list:
-            cookie_dict[c['name']] = c['value']
+        # 3. IFRAME CHECK
+        iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
+        if iframe:
+            print(">> Cloudflare Challenge Detected. Attempting Click...")
+            time.sleep(2)
+            try: iframe.ele('tag:body').click()
+            except: pass
+            time.sleep(5)
+            
+        # 4. FINAL VERIFICATION
+        if "blocked" in page.title.lower() or "security" in page.html.lower():
+            print(">> FAILED: Still blocked after wait.")
+            # Dump HTML to see what's happening
+            print(page.html[:500])
+            sys.exit(1)
 
-        ua = page.run_js("return navigator.userAgent")
-        return cookie_dict, ua
+        # 5. FILTERS
+        print(">> Attempting Filters...")
+        try:
+            # Try to set filters if the button exists
+            ext_btn = page.ele('css:button[data-id="extension"]', timeout=5)
+            if ext_btn:
+                ext_btn.click()
+                time.sleep(0.5)
+                page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
+                time.sleep(1)
+                
+                page.ele('css:button[data-id="venue"]').click()
+                time.sleep(0.5)
+                page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
+                time.sleep(1)
+                
+                page.ele('#search-submit').click()
+                print(">> Filters Applied.")
+                time.sleep(3)
+        except Exception as e:
+            print(f">> Filters skipped (using defaults): {e}")
+
+        # 6. SCRAPE
+        print(">> Extracting Data...")
+        page.wait.ele_displayed('#search-results tbody tr', timeout=15)
+        
+        rows = page.eles('#search-results tbody tr')
+        data = []
+        print(f">> Found {len(rows)} rows.")
+
+        for row in rows:
+            if "No matching" in row.text: continue
+            cols = row.eles('tag:td')
+            if len(cols) < 4: continue
+            
+            domain = cols[0].text.strip()
+            date = cols[2].text.strip()
+            venue = cols[3].text.strip()
+            price = get_price_via_ocr(cols[1]).replace("USD","").replace("$","").strip()
+            
+            print(f"   + {domain} | {price}")
+            data.append([domain, price, date, venue])
+
+        # 7. SAVE
+        with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Domain", "Price", "Date", "Venue"])
+            writer.writerows(data)
+            
+        print(f">> SUCCESS! Saved {len(data)} rows.")
 
     except Exception as e:
-        print(f">> Browser Error: {e}")
-        return None
+        print(f">> FATAL ERROR: {e}")
+        try: page.get_screenshot(path="debug_fatal.png")
+        except: pass
+        sys.exit(1)
+    
     finally:
         page.quit()
         if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin")
-
-def scrape_api(cookies, user_agent, proxy_url):
-    print("\n>> PHASE 2: API Injection (The Heist)...")
-    
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://namebio.com",
-        "Referer": "https://namebio.com/",
-    }
-
-    # Payload (Last Sold)
-    payload = {
-        "draw": "1",
-        "start": "0",
-        "length": "25",
-        "tld[]": "com",
-        "venue[]": "godaddy",
-        "date_start": "today",
-        "date_end": "today",
-        "order[0][column]": "2",
-        "order[0][dir]": "desc"
-    }
-
-    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-
-    try:
-        print(">> Sending API Request...")
-        resp = requests.post(
-            "https://namebio.com/jm-ajax/search",
-            headers=headers,
-            data=payload,
-            cookies=cookies,
-            proxies=proxies,
-            timeout=30
-        )
-        
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-            except:
-                print(">> API returned HTML (Cloudflare blocked the API call).")
-                print(f">> Response Start: {resp.text[:100]}")
-                return None
-                
-            rows = data.get("data", [])
-            print(f">> SUCCESS! API returned {len(rows)} rows.")
-            
-            clean_data = []
-            for row in rows:
-                domain = row.get('domain', '').split('<')[0].strip()
-                price_raw = row.get('price', '')
-                if "<img" in str(price_raw): price = "IMAGE_PRICE" 
-                else: price = str(price_raw).replace('$', '').replace(',', '').strip()
-                
-                date = row.get('date', '')
-                venue = row.get('venue', '')
-                
-                print(f"   + {domain} | {price}")
-                clean_data.append([domain, price, date, venue])
-                
-            return clean_data
-        else:
-            print(f">> API FAILED. Status: {resp.status_code}")
-            return None
-
-    except Exception as e:
-        print(f">> API Error: {e}")
-        return None
-
-def main():
-    print(">> Starting DropDax 'Cookie Handoff' Scraper (CDP Mode)...")
-    proxy_url = os.environ.get("PROXY_URL")
-    
-    with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Domain", "Price", "Date", "Venue"])
-
-    for attempt in range(1, 4):
-        print(f"\n=== ATTEMPT {attempt}/3 ===")
-        
-        result = get_cookies_via_cdp(proxy_url)
-        if not result:
-            print(">> Cookie Harvest failed. Rotating...")
-            continue
-            
-        cookies, ua = result
-        
-        # Check if we got the critical PHPSESSID
-        if 'PHPSESSID' not in cookies:
-             print(">> WARNING: PHPSESSID missing. Session might be invalid.")
-        
-        data = scrape_api(cookies, ua, proxy_url)
-        
-        if data:
-            with open(OUTPUT_FILE, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerows(data)
-            print(f"\n>> MISSION COMPLETE. Saved {len(data)} rows to {OUTPUT_FILE}")
-            sys.exit(0)
-            
-        print(">> API rejected cookies. Retrying session...")
-        time.sleep(5)
-
-    print("\n>> FATAL: All attempts failed.")
-    sys.exit(1)
 
 if __name__ == "__main__":
     main()
