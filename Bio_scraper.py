@@ -26,7 +26,7 @@ def main():
         "browser": "true",
         "proxy_type": "residential", 
         "wait_for_selector": "#sales-table", # Wait until the table actually appears
-        "timeout": "120" # Allow extra time for the browser to load
+        "timeout": "60" # Allow extra time for the browser to load
     }
 
     try:
