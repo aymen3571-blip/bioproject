@@ -16,12 +16,7 @@ OUTPUT_FILE = "namebio_data.csv"
 
 # --- PROXY AUTH EXTENSION GENERATOR ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
-    """
-    Creates a temporary Chrome extension to handle Proxy Authentication.
-    DrissionPage/Chrome cannot handle user:pass@host directly.
-    """
     try:
-        # Parse the proxy URL
         parsed = urlparse(proxy_string)
         username = parsed.username
         password = parsed.password
@@ -30,15 +25,12 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         scheme = parsed.scheme
 
         if not username or not password:
-            print(">> Proxy does not have authentication. Using standard method.")
             return None
 
-        # Clean up old plugin if exists
         if os.path.exists(plugin_dir):
             shutil.rmtree(plugin_dir)
         os.makedirs(plugin_dir)
 
-        # 1. Create manifest.json
         manifest_json = """
         {
             "version": "1.0.0",
@@ -60,7 +52,6 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         }
         """
 
-        # 2. Create background.js
         background_js = f"""
         var config = {{
             mode: "fixed_servers",
@@ -98,7 +89,6 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         with open(os.path.join(plugin_dir, "background.js"), "w") as f:
             f.write(background_js)
 
-        print(f">> Created Proxy Auth Plugin for {host}:{port}")
         return os.path.abspath(plugin_dir)
 
     except Exception as e:
@@ -108,71 +98,59 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
 # --- HELPER FUNCTIONS ---
 
 def get_price_via_ocr(ele):
-    """Takes a screenshot of the price element and OCRs it."""
     try:
-        # DrissionPage can get bytes directly
         png_bytes = ele.get_screenshot(as_bytes=True)
         image = Image.open(BytesIO(png_bytes))
-        # --psm 7 treats the image as a single text line
         text = pytesseract.image_to_string(image, config='--psm 7').strip()
         return text
     except Exception as e:
-        print(f"   [OCR Error] {e}")
         return "OCR_ERROR"
 
 def safe_screenshot(page, name):
-    """Safely takes a screenshot without crashing on timeout."""
     try:
         page.get_screenshot(path=name)
-    except Exception as e:
-        print(f">> Could not take screenshot {name}: {e}")
+    except:
+        pass
+
+def check_for_hard_block(page):
+    """Checks if we are on the 'Sorry, you have been blocked' page."""
+    if "blocked" in page.title.lower() or "security service" in page.html.lower():
+        print(">> CRITICAL: Detected Hard Block (Firewall Ban).")
+        safe_screenshot(page, "debug_hard_block.png")
+        return True
+    return False
 
 def bypass_turnstile(page):
-    """
-    Scans for Cloudflare Turnstile widget and clicks it.
-    DrissionPage handles iframes much better than Playwright.
-    """
     print(">> Checking for Cloudflare Turnstile...")
+    time.sleep(5)
     
-    # Give it a moment to render
-    time.sleep(3)
-    
-    # Check if we are blocked
+    if check_for_hard_block(page):
+        return False
+
     if "Just a moment" not in page.title and "robot" not in page.title.lower():
         print(">> No challenge detected.")
         return True
 
     print(">> Challenge Detected! Scanning for widget...")
     
-    # Try for 30 seconds
     for i in range(30):
         try:
-            # 1. Check success
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
                 print(">> SUCCESS! Challenge passed.")
                 return True
 
-            # 2. Find the iframe
-            # DrissionPage can search for elements inside specific iframes easily
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
             
             if iframe:
                 print(f">> Found Turnstile Iframe. Attempting click... ({i}s)")
-                
-                # 3. Click the checkbox inside the iframe
-                # We target the body or the specific checkbox wrapper
                 body = iframe.ele('tag:body', timeout=2)
                 if body:
-                    # Click slightly offset from center to look human
                     body.click(by_js=False) 
                     time.sleep(2)
-            
             time.sleep(1)
-            
-        except Exception as e:
+        except:
             pass
             
-    # Final Check
     if "Just a moment" in page.title:
         print(">> FAILED: Cloudflare stuck.")
         return False
@@ -180,23 +158,30 @@ def bypass_turnstile(page):
     return True
 
 def apply_filters(page):
-    """
-    Interacts with the NameBio UI to set filters manually.
-    """
     print(">> Applying Search Filters...")
     
     try:
+        # Check if we are blocked before trying filters
+        if check_for_hard_block(page):
+             raise Exception("Hard Block detected before filters.")
+
         # 1. Extension -> .com
-        # Find the button by its data-id
-        ext_btn = page.ele('css:button[data-id="extension"]', timeout=5)
+        ext_btn = page.ele('css:button[data-id="extension"]', timeout=10)
         if not ext_btn:
-            raise Exception("Extension button not found (Page load error?)")
+             # Double check for block
+             if check_for_hard_block(page):
+                 raise Exception("Hard Block detected.")
+             
+             # Check if we are on the wrong page (Dashboard)
+             if "account" in page.url or "dashboard" in page.url:
+                 print(">> Wrong Page (Dashboard). Redirecting...")
+                 return False # Signal to retry navigation
+                 
+             safe_screenshot(page, "debug_no_filters.png")
+             raise Exception("Extension button not found.")
         
         ext_btn.click()
         time.sleep(0.5)
-        
-        # Click the .com option in the dropdown list
-        # We look for the open dropdown
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
         time.sleep(1)
         print("   -> Extension set to .com")
@@ -205,34 +190,27 @@ def apply_filters(page):
         venue_btn = page.ele('css:button[data-id="venue"]')
         venue_btn.click()
         time.sleep(0.5)
-        
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
         time.sleep(1)
         print("   -> Venue set to GoDaddy")
 
-        # 3. Date -> Today (First Option)
-        # The user requested the first option in the list.
+        # 3. Date -> Today
         date_btn = page.ele('css:button[data-id="date-range"]')
         date_btn.click()
         time.sleep(0.5)
-        
-        # Select the 2nd LI (Index 1) because Index 0 is usually 'Any' or a header
-        # DrissionPage element search finds the list in the open container
         date_options = page.eles('xpath://div[contains(@class, "open")]//ul/li')
         if len(date_options) > 1:
-            # Click the second item (the first real date)
             date_options[1].click()
-            print("   -> Date set to Today (First Option)")
-        else:
-            print("   [!] Could not find date options.")
+            print("   -> Date set to Today")
         time.sleep(1)
 
         # 4. Rows -> 25
-        # This is a <select> element
         sel = page.ele('css:select[name="search-results_length"]')
         sel.select('25')
         print("   -> Rows set to 25")
         time.sleep(2)
+        
+        return True
 
     except Exception as e:
         print(f">> Error applying filters: {e}")
@@ -240,35 +218,33 @@ def apply_filters(page):
         raise e
 
 def main():
-    print(">> Starting DropDax Scraper (DrissionPage Engine)...")
+    print(">> Starting DropDax Scraper (DrissionPage Stealth)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     
-    # --- SETUP CHROMIUM OPTIONS ---
     co = ChromiumOptions()
     
-    # 1. SETUP PROXY (Using Extension Method)
+    # 1. SETUP PROXY
     if proxy_url:
         print(">> PROXY DETECTED. Generating Auth Extension...")
         auth_plugin_path = create_proxy_auth_extension(proxy_url)
-        
         if auth_plugin_path:
-            # Add the extension that handles User/Pass
             co.add_extension(auth_plugin_path)
         else:
-            # Fallback for simple IPs (no password)
             co.set_proxy(proxy_url)
     
-    # 2. Set Arguments for GitHub Actions
+    # 2. STEALTH ARGUMENTS (CRITICAL FOR HARD BLOCK)
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
-    co.set_argument('--disable-dev-shm-usage') # Prevents crashes in docker
+    co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--lang=en-US')
-    
-    # 3. Explicitly set browser path for GHA
+    # Removes the "Automated" flag that triggers firewalls
+    co.set_argument('--disable-blink-features=AutomationControlled') 
+    # Random User Agent to look like a real Windows PC
+    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
-    # Initialize Page
     page = ChromiumPage(addr_or_opts=co)
     
     try:
@@ -279,32 +255,33 @@ def main():
                 cookies = json.load(f)
                 if isinstance(cookies, dict) and 'cookies' in cookies:
                     cookies = cookies['cookies']
-                
                 for cookie in cookies:
                     page.set.cookies(cookie)
-        else:
-            print(">> WARNING: No cookie file found.")
-
+        
         # --- NAVIGATE ---
         print(">> Navigating to NameBio...")
         page.get("https://namebio.com/")
         
-        # --- CLOUDFLARE CHECK ---
+        # --- CHECK BLOCKS ---
+        if check_for_hard_block(page):
+            # If cookies got us banned, clear them and try fresh
+            print(">> Cookies caused a ban. Clearing cookies and retrying...")
+            page.clear_cookies()
+            page.get("https://namebio.com/")
+            time.sleep(5)
+        
         if not bypass_turnstile(page):
             safe_screenshot(page, "debug_cloudflare_fail.png")
             raise Exception("Could not bypass Cloudflare.")
 
-        # --- DASHBOARD CHECK ---
-        # If we logged in, we might be on /account
+        # --- DASHBOARD REDIRECT ---
         if "/account" in page.url or "dashboard" in page.url:
             print(">> Landed on Dashboard. Redirecting to Home...")
             page.get("https://namebio.com/")
             time.sleep(5)
-            # Check Cloudflare again after redirect
             bypass_turnstile(page)
 
-        # --- BANNER HANDLING ---
-        # <div id="nudge-countdown-container"><a data-dismiss="modal">Close</a>
+        # --- BANNER ---
         try:
             banner = page.ele('#nudge-countdown-container', timeout=2)
             if banner:
@@ -316,15 +293,18 @@ def main():
             pass
 
         # --- APPLY FILTERS ---
-        apply_filters(page)
+        success = apply_filters(page)
+        if not success:
+             # Retry once if we were on the dashboard
+             print(">> Retry: Navigating Home again...")
+             page.get("https://namebio.com/")
+             time.sleep(5)
+             apply_filters(page)
 
         # --- SEARCH ---
         print(">> Clicking Search...")
         page.ele('#search-submit').click()
-        
-        # Wait for table
         print(">> Waiting for results...")
-        # Wait until the table has rows. Timeout 60s
         page.wait.ele_displayed('#search-results tbody tr', timeout=60)
         time.sleep(3)
 
@@ -335,26 +315,19 @@ def main():
         print(f">> Processing {len(rows)} rows...")
         
         for row in rows:
-            if "No matching records" in row.text:
-                continue
-                
+            if "No matching records" in row.text: continue
             cols = row.eles('tag:td')
             if len(cols) < 4: continue
 
-            # Text Extraction
             domain = cols[0].text.strip()
             date = cols[2].text.strip()
             venue = cols[3].text.strip()
-            
-            # OCR for Price
-            # cols[1] contains the image
             price_raw = get_price_via_ocr(cols[1])
             price = price_raw.replace("USD", "").replace("$", "").strip()
 
             print(f"   Found: {domain} | {price}")
             data.append([domain, price, date, venue])
 
-        # --- SAVE ---
         with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["Domain", "Price", "Date", "Venue"])
@@ -369,7 +342,6 @@ def main():
     
     finally:
         page.quit()
-        # Clean up the temp plugin
         if os.path.exists("proxy_auth_plugin"):
             shutil.rmtree("proxy_auth_plugin", ignore_errors=True)
 
