@@ -14,8 +14,7 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-# We switch to standard Windows 10 for "Corporate User" trust score
-WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # --- PROXY AUTH EXTENSION (MANIFEST V3) ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
@@ -83,48 +82,54 @@ def safe_screenshot(page, name):
 
 def get_ip_info(page):
     """
-    Robust IP checker using multiple sources.
-    Returns (ip, isp, success_bool)
+    Robust IP checker using lightweight plain-text sources.
+    Returns (ip, source, success_bool)
     """
-    # 1. Try IP-API
+    # Source 1: ifconfig.me (Very fast, plain text)
     try:
-        page.get("http://ip-api.com/json", timeout=10)
-        if "json" in page.url: # Verify we loaded the JSON
-            data = json.loads(page.ele('tag:pre').text)
-            return data.get('query', 'Unknown'), data.get('isp', 'Unknown'), True
-    except: pass
+        page.get("https://ifconfig.me/ip", timeout=30)
+        ip = page.ele('tag:body').text.strip()
+        if len(ip) > 6 and "." in ip:
+            return ip, "ifconfig.me", True
+    except Exception as e:
+        print(f"   > Check 1 failed: {e}")
 
-    # 2. Try IPIFY (Backup)
+    # Source 2: icanhazip.com
     try:
-        page.get("https://api.ipify.org?format=json", timeout=10)
-        if "json" in page.url:
-            data = json.loads(page.ele('tag:pre').text)
-            return data.get('ip', 'Unknown'), "Unknown (Backup)", True
-    except: pass
+        page.get("https://icanhazip.com", timeout=30)
+        ip = page.ele('tag:body').text.strip()
+        if len(ip) > 6 and "." in ip:
+            return ip, "icanhazip.com", True
+    except Exception as e:
+        print(f"   > Check 2 failed: {e}")
 
-    return "Unknown", "Unknown", False
+    # Source 3: Amazon AWS Check
+    try:
+        page.get("https://checkip.amazonaws.com", timeout=30)
+        ip = page.ele('tag:body').text.strip()
+        if len(ip) > 6 and "." in ip:
+            return ip, "AWS", True
+    except Exception as e:
+        print(f"   > Check 3 failed: {e}")
+
+    return "Unknown", "None", False
 
 def check_connection_safety(page):
-    """
-    STRICT GATEKEEPER: Returns True only if IP is verified residential.
-    """
-    ip, isp, success = get_ip_info(page)
+    ip, source, success = get_ip_info(page)
     
-    print(f">> CONNECTION TEST: IP={ip} | ISP={isp}")
+    print(f">> CONNECTION TEST ({source}): IP={ip}")
     
     if not success or ip == "Unknown":
-        print(">> ERROR: Could not verify IP. Connection unstable.")
+        print(">> ERROR: Could not verify IP. Internet access blocked.")
         return False
         
-    # BAD ISP LIST (Datacenters)
-    bad_keywords = ["Microsoft", "Azure", "Google", "Amazon", "Datacenter", "DigitalOcean", "Hetzner", "Unknown"]
-    
-    for kw in bad_keywords:
-        if kw.lower() in isp.lower():
-            print(f">> BLOCKING: Detected Datacenter ISP ({kw}). Unsafe.")
-            return False
+    # BAD ISP CHECK (Heuristic based on IP range ownership)
+    # Since we can't easily get ISP from plain text, we check for Azure ranges
+    if ip.startswith("20.") or ip.startswith("172.") or ip.startswith("52.") or ip.startswith("40."):
+        print(f">> BLOCKING: IP {ip} looks like Microsoft Azure.")
+        return False
             
-    print(">> SUCCESS: Residential connection verified.")
+    print(">> SUCCESS: Connection Verified.")
     return True
 
 def is_blocked(page):
@@ -203,7 +208,7 @@ def apply_filters(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Strict Gatekeeper V2)...")
+    print(">> Starting DropDax Scraper (Verbose Diagnostic)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     plugin_path = None
@@ -216,21 +221,19 @@ def main():
     page = None
     clean_connection = False
     
-    # Try up to 5 times to get a clean proxy
-    for attempt in range(1, 6): 
+    for attempt in range(1, 6): # Try 5 times
         print(f"\n>> Connection Check (Attempt {attempt}/5)...")
         
         co = ChromiumOptions()
         if plugin_path: 
             co.add_extension(plugin_path)
-            co.set_argument(f'--load-extension={plugin_path}')
+            # NOTE: removed set_argument('--load-extension') to avoid double loading
         
         co.set_argument(f'--user-agent={WINDOWS_UA}')
         co.set_argument('--window-size=1920,1080')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--lang=en-US')
-        # This argument is critical for stealth
         co.set_argument('--disable-blink-features=AutomationControlled') 
         co.set_paths(browser_path='/usr/bin/google-chrome')
         
@@ -243,21 +246,21 @@ def main():
                 clean_connection = True
                 break
             else:
-                print(">> Retrying for better IP...")
+                print(">> Retrying...")
                 
         except Exception as e:
             print(f">> Init Failed: {e}")
             time.sleep(2)
 
     if not clean_connection:
-        print(">> FATAL: No clean IP found. Aborting to protect account.")
+        print(">> FATAL: No clean IP found after 5 attempts.")
         if page: page.quit()
         sys.exit(1)
 
     try:
         # --- EXECUTION PHASE ---
-        print(">> Connection Secure. Warming up...")
-        page.get("https://www.google.com")
+        print(">> Warming up Trust Score via Google...")
+        page.get("https://www.google.com/search?q=site:namebio.com")
         time.sleep(2)
         
         print(">> Entering NameBio...")
