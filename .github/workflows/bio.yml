@@ -1,4 +1,4 @@
-name: DropDax NameBio Scraper
+name: DropDax NameBio Scraper (DrissionPage)
 
 on:
   schedule:
@@ -21,30 +21,31 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install System Dependencies (Added xvfb)
+      # 1. Install System Dependencies
+      # We need Tesseract for OCR and Xvfb for the display
       - name: Install System Deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr xvfb
+          sudo apt-get install -y tesseract-ocr xvfb google-chrome-stable
 
-      # 2. Install Python Libraries (Added playwright-stealth)
+      # 2. Install Python Libraries
+      # DrissionPage replaces Playwright here
       - name: Install Python Dependencies
         run: |
-          pip install playwright pytesseract pillow playwright-stealth
-          playwright install chromium
+          pip install DrissionPage pytesseract pillow
 
       # 3. Create Session File
       - name: Create Session File
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
-      # 4. Run Scraper with Virtual Display (xvfb-run)
-      # This enables "headless=False" to work on the server!
+      # 4. Run Scraper with Virtual Display
+      # DrissionPage needs a UI to render the Turnstile widget
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python Bio_scraper.py
 
-      # 5. Upload Screenshots if it fails
+      # 5. Upload Debug Screenshots (If it fails)
       - name: Upload Debug Screenshots
         if: always()
         uses: actions/upload-artifact@v4
