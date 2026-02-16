@@ -107,27 +107,24 @@ def get_cookies_via_browser(proxy_url):
             print(">> FAILED: Timeout waiting for challenge.")
             return None
 
-        # 3. Extract Cookies (FIXED SYNTAX)
+        # 3. Extract Cookies (ROBUST METHOD)
         print(">> Extracting Cookies...")
         
-        # Try multiple methods to get the raw list of cookies
-        try:
-            raw_cookies = page.get_cookies() # Method in newer versions
-        except:
-            try:
-                raw_cookies = page.cookies # Property in older versions
-            except:
-                print(">> Error: Could not retrieve cookie object.")
-                return None
-                
-        # Manually convert list of dicts to simple dict {name: value}
+        # Determine if .cookies is a property or a method
+        raw_cookies = page.cookies
+        if callable(raw_cookies):
+            print("   > Detected cookies as method. Calling...")
+            raw_cookies = raw_cookies()
+        else:
+            print("   > Detected cookies as property.")
+
+        # Convert to standard dict for requests
         cookie_dict = {}
         for c in raw_cookies:
-            # DrissionPage sometimes returns objects, sometimes dicts
+            # Handle both dictionary and object formats
             if isinstance(c, dict):
                 cookie_dict[c.get('name')] = c.get('value')
             else:
-                # Assuming it's an object with attributes
                 try:
                     cookie_dict[c.name] = c.value
                 except: pass
@@ -155,7 +152,7 @@ def scrape_api(cookies, user_agent, proxy_url):
         "Referer": "https://namebio.com/",
     }
 
-    # API Payload
+    # Payload
     payload = {
         "draw": "1",
         "start": "0",
@@ -197,7 +194,6 @@ def scrape_api(cookies, user_agent, proxy_url):
                 domain = row.get('domain', '').split('<')[0].strip()
                 price_raw = row.get('price', '')
                 
-                # Handle Image Prices vs Text Prices
                 if "<img" in str(price_raw):
                     price = "IMAGE_PRICE" 
                 else:
@@ -219,7 +215,7 @@ def scrape_api(cookies, user_agent, proxy_url):
         return None
 
 def main():
-    print(">> Starting DropDax 'Cookie Handoff' Scraper...")
+    print(">> Starting DropDax 'Cookie Handoff' Scraper (Final V2)...")
     proxy_url = os.environ.get("PROXY_URL")
     
     with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
