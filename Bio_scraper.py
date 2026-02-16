@@ -27,8 +27,12 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         scheme = parsed.scheme or "http"
 
         if not username or not password: return None
-        if os.path.exists(plugin_dir): shutil.rmtree(plugin_dir)
-        os.makedirs(plugin_dir)
+        
+        # USE ABSOLUTE PATH
+        abs_plugin_dir = os.path.abspath(plugin_dir)
+        
+        if os.path.exists(abs_plugin_dir): shutil.rmtree(abs_plugin_dir)
+        os.makedirs(abs_plugin_dir)
 
         manifest_json = """
         {
@@ -62,10 +66,13 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
             ['blocking']
         );
         """
-        with open(os.path.join(plugin_dir, "manifest.json"), "w") as f: f.write(manifest_json)
-        with open(os.path.join(plugin_dir, "background.js"), "w") as f: f.write(background_js)
-        return os.path.abspath(plugin_dir)
-    except: return None
+        with open(os.path.join(abs_plugin_dir, "manifest.json"), "w") as f: f.write(manifest_json)
+        with open(os.path.join(abs_plugin_dir, "background.js"), "w") as f: f.write(background_js)
+        
+        return abs_plugin_dir
+    except Exception as e:
+        print(f">> Proxy Plugin Error: {e}")
+        return None
 
 # --- HELPER FUNCTIONS ---
 def get_price_via_ocr(ele):
@@ -103,15 +110,6 @@ def get_ip_info(page):
     except Exception as e:
         print(f"   > Check 2 failed: {e}")
 
-    # Source 3: Amazon AWS Check
-    try:
-        page.get("https://checkip.amazonaws.com", timeout=30)
-        ip = page.ele('tag:body').text.strip()
-        if len(ip) > 6 and "." in ip:
-            return ip, "AWS", True
-    except Exception as e:
-        print(f"   > Check 3 failed: {e}")
-
     return "Unknown", "None", False
 
 def check_connection_safety(page):
@@ -123,8 +121,6 @@ def check_connection_safety(page):
         print(">> ERROR: Could not verify IP. Internet access blocked.")
         return False
         
-    # BAD ISP CHECK (Heuristic based on IP range ownership)
-    # Since we can't easily get ISP from plain text, we check for Azure ranges
     if ip.startswith("20.") or ip.startswith("172.") or ip.startswith("52.") or ip.startswith("40."):
         print(f">> BLOCKING: IP {ip} looks like Microsoft Azure.")
         return False
@@ -208,7 +204,7 @@ def apply_filters(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Verbose Diagnostic)...")
+    print(">> Starting DropDax Scraper (Absolute Path Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     plugin_path = None
@@ -216,6 +212,14 @@ def main():
     if proxy_url:
         print(">> Generating Auth Plugin...")
         plugin_path = create_proxy_auth_extension(proxy_url)
+        
+        # VERIFY PLUGIN CREATION
+        if plugin_path and os.path.exists(plugin_path):
+            print(f">> Plugin Created at: {plugin_path}")
+            print(f">> Files: {os.listdir(plugin_path)}")
+        else:
+            print(">> FATAL: Plugin creation failed.")
+            sys.exit(1)
 
     # --- THE GATEKEEPER LOOP ---
     page = None
@@ -225,9 +229,10 @@ def main():
         print(f"\n>> Connection Check (Attempt {attempt}/5)...")
         
         co = ChromiumOptions()
+        
+        # USE DIRECT ARGUMENT INJECTION FOR RELIABILITY
         if plugin_path: 
-            co.add_extension(plugin_path)
-            # NOTE: removed set_argument('--load-extension') to avoid double loading
+            co.set_argument(f'--load-extension={plugin_path}')
         
         co.set_argument(f'--user-agent={WINDOWS_UA}')
         co.set_argument('--window-size=1920,1080')
