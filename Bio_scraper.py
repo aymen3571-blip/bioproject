@@ -178,7 +178,7 @@ def apply_filters_mobile(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Operation Mobile Ghost)...")
+    print(">> Starting DropDax Scraper (Operation Mobile Ghost V2)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     
@@ -190,9 +190,11 @@ def main():
         plugin = create_proxy_auth_extension(proxy_url)
         if plugin: co.add_extension(plugin)
 
-    # 2. MOBILE EMULATION (The Stealth Key)
-    # This forces Chrome to render as a Mobile Browser
-    co.set_mobile(ua=MOBILE_UA, width=390, height=844)
+    # 2. MOBILE EMULATION (MANUAL ARGUMENTS)
+    # Replaced 'set_mobile' with manual arguments to fix AttributeError
+    co.set_argument(f'--user-agent={MOBILE_UA}')
+    co.set_argument('--window-size=390,844')
+    co.set_argument('--touch-events=enabled')
     
     # 3. STANDARD ARGS
     co.set_argument('--no-sandbox')
