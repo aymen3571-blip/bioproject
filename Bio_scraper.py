@@ -1,161 +1,233 @@
 import os
 import csv
-import sys
 import time
-import json
+import shutil
+import sys
+import pytesseract
+from PIL import Image
+from io import BytesIO
 from urllib.parse import urlparse
-import tls_client
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 # --- CONFIGURATION ---
 OUTPUT_FILE = "namebio_data.csv"
-PROXY_URL = os.environ.get("PROXY_URL")
+# We act as a generic Android device. This matches the Linux kernel of the server.
+ANDROID_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-def init_csv():
-    """Creates the CSV file immediately to prevent Git errors."""
-    with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Domain", "Price", "Date", "Venue"])
-    print(f">> Initialized {OUTPUT_FILE}")
-
-def get_proxy_string():
-    if not PROXY_URL: return None
+# --- PROXY EXTENSION (MANIFEST V2 - RELIABLE) ---
+def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
     try:
-        parsed = urlparse(PROXY_URL)
-        return f"http://{parsed.username}:{parsed.password}@{parsed.hostname}:{parsed.port}"
-    except:
-        return None
+        parsed = urlparse(proxy_string)
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port
+        scheme = parsed.scheme or "http"
+        
+        if not username or not password: return None
+        
+        abs_dir = os.path.abspath(plugin_dir)
+        if os.path.exists(abs_dir): shutil.rmtree(abs_dir)
+        os.makedirs(abs_dir)
+
+        manifest_json = """
+        {
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Proxy Auth",
+            "permissions": ["proxy", "tabs", "<all_urls>", "webRequest", "webRequestBlocking"],
+            "background": {"scripts": ["background.js"]}
+        }
+        """
+
+        background_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "{scheme}",
+                    host: "{host}",
+                    port: parseInt({port})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+        chrome.webRequest.onAuthRequired.addListener(
+            function(details) {{
+                return {{authCredentials: {{username: "{username}", password: "{password}"}}}};
+            }},
+            {{urls: ["<all_urls>"]}},
+            ['blocking']
+        );
+        """
+        with open(os.path.join(abs_dir, "manifest.json"), "w") as f: f.write(manifest_json)
+        with open(os.path.join(abs_dir, "background.js"), "w") as f: f.write(background_js)
+        return abs_dir
+    except: return None
+
+def get_price_via_ocr(ele):
+    try:
+        png_bytes = ele.get_screenshot(as_bytes=True)
+        image = Image.open(BytesIO(png_bytes))
+        text = pytesseract.image_to_string(image, config='--psm 7').strip()
+        return text
+    except: return "OCR_ERROR"
+
+def is_blocked(page):
+    if "blocked" in page.title.lower() or "security service" in page.html.lower():
+        print("   >> DETECTED: Hard Block.")
+        return True
+    return False
+
+def bypass_turnstile(page):
+    print(">> Checking Security...")
+    time.sleep(3)
+    if is_blocked(page): return False
+    
+    if "Just a moment" in page.title or "robot" in page.title.lower():
+        print(">> Turnstile Challenge Detected...")
+        # Android Emulation handles touch events automatically in DrissionPage
+        for i in range(25):
+            if "Just a moment" not in page.title and "robot" not in page.title.lower():
+                print(">> SUCCESS! Security Cleared.")
+                return True
+            iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
+            if iframe:
+                try: iframe.ele('tag:body').click(); time.sleep(1)
+                except: pass
+            time.sleep(1)
+        return False
+    return True
+
+def apply_filters_mobile(page):
+    print(">> Applying Mobile Filters...")
+    try:
+        # On mobile, we might need to click a "Filters" toggle first, 
+        # but usually the inputs are just stacked.
+        
+        # 1. Extension (.com)
+        # Wait for the dropdown button
+        ext_btn = page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10)
+        ext_btn.click()
+        time.sleep(0.5)
+        page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
+        
+        # 2. Venue (GoDaddy)
+        page.ele('css:button[data-id="venue"]').click()
+        time.sleep(0.5)
+        page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
+        
+        # 3. Date (Today)
+        page.ele('css:button[data-id="date-range"]').click()
+        time.sleep(0.5)
+        dates = page.eles('xpath://div[contains(@class, "open")]//ul/li')
+        if len(dates) > 1: dates[1].click()
+        
+        # 4. Search
+        page.ele('#search-submit').click()
+        return True
+    except Exception as e:
+        print(f">> Filter Error: {e}")
+        return False
 
 def main():
-    print(">> Starting DropDax API Scraper (Session Priming Mode)...")
+    print(">> Starting DropDax Scraper (Android GPU-Kill Mode)...")
+    proxy_url = os.environ.get("PROXY_URL")
+    plugin_path = create_proxy_auth_extension(proxy_url) if proxy_url else None
+
+    co = ChromiumOptions()
     
-    init_csv()
+    # 1. PROXY
+    if plugin_path: co.add_extension(plugin_path)
+    
+    # 2. IDENTITY: ANDROID
+    co.set_argument(f'--user-agent={ANDROID_UA}')
+    
+    # 3. CRITICAL: KILL THE GPU (Prevents Linux Fingerprinting)
+    co.set_argument('--disable-gpu')
+    co.set_argument('--disable-software-rasterizer')
+    co.set_argument('--disable-webgl')
+    co.set_argument('--disable-webgl2')
+    co.set_argument('--disable-3d-apis')
+    co.set_argument('--disable-accelerated-2d-canvas')
+    
+    # 4. MOBILE VIEWPORT
+    co.set_argument('--window-size=375,812') # iPhone X / Pixel size
+    
+    # 5. STANDARD
+    co.set_argument('--no-sandbox')
+    co.set_argument('--disable-dev-shm-usage')
+    co.set_argument('--lang=en-US')
+    co.set_paths(browser_path='/usr/bin/google-chrome')
 
-    # 1. SETUP SESSION
-    # We use 'chrome_120' to match the User-Agent perfectly
-    session = tls_client.Session(
-        client_identifier="chrome_120",
-        random_tls_extension_order=True
-    )
-
-    proxy_str = get_proxy_string()
-    if proxy_str:
-        print(f">> Proxy Configured: {proxy_str.split('@')[1]}")
-        session.proxies = {"http": proxy_str, "https": proxy_str}
-
-    # 2. COMMON HEADERS
-    base_headers = {
-        "Host": "namebio.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-    }
+    page = ChromiumPage(addr_or_opts=co)
 
     try:
-        # 3. STEP 1: VISIT HOMEPAGE (Get Cookies)
-        print(">> Step 1: Visiting Homepage to prime cookies...")
-        resp_home = session.get(
-            "https://namebio.com/",
-            headers=base_headers,
-            timeout_seconds=30
-        )
+        print(">> Waiting for Proxy...")
+        time.sleep(5)
         
-        if resp_home.status_code != 200:
-            print(f">> FATAL: Homepage Blocked (Status {resp_home.status_code})")
-            print(resp_home.text[:500])
+        # IP CHECK
+        page.get("https://api.ipify.org", timeout=15)
+        print(f">> IP: {page.ele('tag:body').text}")
+
+        # NAVIGATION
+        print(">> Loading NameBio (Last Sold)...")
+        # Direct entry to the table page
+        page.get("https://namebio.com/last-sold")
+        
+        if not bypass_turnstile(page):
+            print(">> FAILED: Turnstile blocked.")
             sys.exit(1)
             
-        print(">> Cookies Acquired:", session.cookies.get_dict())
-        time.sleep(2) # Slight pause to look human
-
-        # 4. STEP 2: CALL SEARCH API
-        print(">> Step 2: Sending Authenticated Search Request...")
+        # CLEAR BANNER
+        try:
+            banner = page.ele('#nudge-countdown-container', timeout=3)
+            if banner: banner.ele('css:a[data-dismiss="modal"]').click()
+        except: pass
         
-        # Update headers for AJAX request
-        api_headers = base_headers.copy()
-        api_headers.update({
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Origin": "https://namebio.com",
-            "Referer": "https://namebio.com/",
-            "X-Requested-With": "XMLHttpRequest",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        })
-        # Remove 'Upgrade-Insecure-Requests' for AJAX
-        del api_headers["Upgrade-Insecure-Requests"]
-
-        # Payload matching your filters
-        payload = {
-            "draw": "1",
-            "start": "0",
-            "length": "25",
-            "search[value]": "",
-            "search[regex]": "false",
-            "tld[]": "com",
-            "venue[]": "godaddy",
-            "date_start": "today",
-            "date_end": "today",
-            "order[0][column]": "2",
-            "order[0][dir]": "desc"
-        }
-
-        resp_api = session.post(
-            "https://namebio.com/jm-ajax/search",
-            headers=api_headers,
-            data=payload,
-            timeout_seconds=30
-        )
-
-        print(f">> Status Code: {resp_api.status_code}")
-
-        if resp_api.status_code == 200:
-            try:
-                json_data = resp_api.json()
-                rows = json_data.get("data", [])
-                
-                print(f">> Success! Found {len(rows)} records.")
-                
-                clean_data = []
-                for row in rows:
-                    domain = row.get('domain', '').split('<')[0].strip()
-                    price = row.get('price', '').replace('$', '').replace(',', '').strip()
-                    date = row.get('date', '')
-                    venue = row.get('venue', '')
-                    
-                    print(f"   + {domain} | ${price}")
-                    clean_data.append([domain, price, date, venue])
-
-                with open(OUTPUT_FILE, 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerows(clean_data)
-                
-            except json.JSONDecodeError:
-                print(">> ERROR: Response was not JSON (Likely Cloudflare Block).")
-                print(">> RESPONSE SNIPPET:")
-                print(resp_api.text[:500])
-                sys.exit(1)
-        
-        elif resp_api.status_code == 403:
-            print(">> CRITICAL: 403 Forbidden (Cloudflare Hard Block).")
-            # Dump the HTML to see if it's a captcha page
-            print(resp_api.text[:500])
+        # APPLY FILTERS
+        if not apply_filters_mobile(page):
+            print(">> Filters failed.")
             sys.exit(1)
             
-        else:
-            print(f">> ERROR: Unexpected Status {resp_api.status_code}")
-            sys.exit(1)
+        print(">> Waiting for Results...")
+        page.wait.ele_displayed('#search-results tbody tr', timeout=30)
+        
+        # SCRAPE
+        rows = page.eles('#search-results tbody tr')
+        data = []
+        print(f">> Found {len(rows)} rows.")
+
+        for row in rows:
+            if "No matching" in row.text: continue
+            cols = row.eles('tag:td')
+            if len(cols) < 4: continue
+            
+            domain = cols[0].text.strip()
+            date = cols[2].text.strip()
+            venue = cols[3].text.strip()
+            price = get_price_via_ocr(cols[1]).replace("USD","").replace("$","").strip()
+            
+            print(f"   + {domain} | {price}")
+            data.append([domain, price, date, venue])
+
+        with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Domain", "Price", "Date", "Venue"])
+            writer.writerows(data)
+            
+        print(f">> SUCCESS. Saved {len(data)} rows.")
 
     except Exception as e:
-        print(f">> FATAL ERROR: {e}")
+        print(f">> FATAL: {e}")
+        try: page.get_screenshot(path="debug_final.png")
+        except: pass
         sys.exit(1)
+    
+    finally:
+        page.quit()
+        if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin")
 
 if __name__ == "__main__":
     main()
