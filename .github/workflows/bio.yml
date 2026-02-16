@@ -12,17 +12,18 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
-    # Service Container
+    # --- SERVICE CONTAINER DEFINITION ---
     services:
       flaresolverr:
         image: flaresolverr/flaresolverr:latest
         ports:
           - 8191:8191
-        environment:
+        # FIX: Use 'env' instead of 'environment'
+        env:
           LOG_LEVEL: info
           TZ: America/New_York
-          # Improve stability on CI environments
           CAPTCHA_SOLVER: none 
+    # ------------------------------------
 
     steps:
       - name: Checkout Code
@@ -37,10 +38,11 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      # --- CRITICAL FIX: WAIT FOR FLARESOLVERR ---
+      # Wait for FlareSolverr to start
       - name: Wait for FlareSolverr
         run: |
           echo "Waiting for FlareSolverr to start..."
+          # Loop for up to 30 seconds checking if the service is up
           timeout 30s bash -c 'until curl -s http://localhost:8191/health > /dev/null; do sleep 2; done'
           echo "FlareSolverr is UP!"
 
@@ -56,7 +58,10 @@ jobs:
         run: |
           git config --global user.name "DropDax Bot"
           git config --global user.email "bot@dropdax.com"
+          # Stash any unstaged changes to avoid conflicts
+          git stash || true
+          git pull --rebase
+          git stash pop || true
           git add namebio_data.csv
-          # Only commit if file changed
           git commit -m "Update NameBio Data [$(date)]" || echo "No changes to commit"
           git push
