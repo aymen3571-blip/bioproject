@@ -29,10 +29,9 @@ jobs:
           sudo apt-get install -y tesseract-ocr xvfb google-chrome-stable
 
       # 2. Install Python Libraries
-      # DrissionPage replaces Playwright here
       - name: Install Python Dependencies
         run: |
-          pip install DrissionPage pytesseract pillow
+          pip install requests tls_client
 
       # 3. Create Session File
       - name: Create Session File
