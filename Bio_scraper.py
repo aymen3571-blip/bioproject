@@ -1,58 +1,35 @@
-import requests
-import csv
-import os
-import time
+from curl_cffi import requests # <--- The Magic Library
 from bs4 import BeautifulSoup
-
-# 1. SAFER KEY LOADING: We use .strip() to remove invisible spaces/newlines
-API_KEY = os.getenv("SCRAPE_DO_TOKEN", "").strip()
+import csv
+import time
 
 def main():
-    print(">> Starting NameBio Scrape via ScrapingAnt...")
-    
-    if not API_KEY:
-        print(">> CRITICAL ERROR: API Key is missing or empty.")
-        exit(1)
-
+    print(">> Starting NameBio Scrape (The 'Impostor' Method)...")
     target_url = "https://namebio.com"
-    api_url = "https://api.scrapingant.com/v2/general"
 
-    # 2. SIMPLIFIED PARAMETERS
-    # We removed 'wait_for_selector' because it was causing empty responses.
-    # We added 'return_page_source' to ensure we get the HTML.
-    params = {
-        "x-api-key": API_KEY,
-        "url": target_url,
-        "browser": "true",
-        "proxy_type": "residential", 
-        "return_page_source": "true" 
-    }
-
+    # We use 'impersonate="chrome120"' to mimic a real Chrome browser's handshake.
+    # This often bypasses the "Checking your browser" screen completely.
     try:
-        print(">> Sending request...")
-        response = requests.get(api_url, params=params, timeout=120)
+        print(">> Sending request as Chrome 120...")
+        
+        # Notice we use requests.get from curl_cffi, not standard requests
+        response = requests.get(
+            target_url, 
+            impersonate="chrome120", 
+            timeout=30
+        )
 
-        # 3. DEBUGGING THE RESPONSE
         if response.status_code == 200:
-            try:
-                data = response.json()
-            except ValueError:
-                print(">> ERROR: The API returned 200 OK but the body was not JSON.")
-                print(f">> Raw Response: {response.text[:500]}") # Print what we actually got
+            # Check if we still got the captcha redirect
+            if "window.location" in response.text and "captcha" in response.text:
+                print(">> Failed: Still got sent to Captcha Jail.")
+                # We can't solve it, but we know why it failed.
                 exit(1)
 
-            html_content = data.get("content", "")
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            if not html_content:
-                print(">> Error: ScrapingAnt returned empty HTML content.")
-                print(f">> Full API Response: {data}")
-                exit(1)
-
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # --- PARSING ---
+            # --- PARSING LOGIC (Same as before) ---
             table = soup.find('table', id='sales-table')
-            
             if not table:
                 # Backup search
                 for t in soup.find_all('table'):
@@ -62,8 +39,7 @@ def main():
                         break
             
             if not table:
-                print(">> CRITICAL: Table not found. We might be blocked.")
-                print(">> Page Title:", soup.title.string if soup.title else "No Title")
+                print(">> CRITICAL: Table not found. NameBio layout might have changed.")
                 exit(1)
 
             rows = table.find('tbody').find_all('tr')
@@ -93,7 +69,6 @@ def main():
 
         else:
             print(f">> FAILED. Status: {response.status_code}")
-            print(f">> Error: {response.text}")
             exit(1)
 
     except Exception as e:
