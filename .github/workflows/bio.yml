@@ -1,4 +1,4 @@
-name: DropDax NameBio Scraper (DrissionPage)
+name: DropDax NameBio Scraper (API Mode)
 
 on:
   schedule:
@@ -21,38 +21,28 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install System Dependencies
-      # We need Tesseract for OCR and Xvfb for the display
+      # 1. Install System Dependencies (Minimal)
       - name: Install System Deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr xvfb google-chrome-stable
+          # We don't need Chrome/XVFB for the API method, but keeping them doesn't hurt
 
-      # 2. Install Python Libraries
+      # 2. Install Python Libraries (Added typing_extensions)
       - name: Install Python Dependencies
         run: |
-          pip install requests tls_client
+          pip install requests tls_client typing_extensions
 
-      # 3. Create Session File
+      # 3. Create Session File (Placeholder)
       - name: Create Session File
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
-      # 4. Run Scraper with Virtual Display
-      # DrissionPage needs a UI to render the Turnstile widget
+      # 4. Run Scraper (No XVFB needed for API)
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python Bio_scraper.py
+        run: python Bio_scraper.py
 
-      # 5. Upload Debug Screenshots (If it fails)
-      - name: Upload Debug Screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: "*.png"
-
-      # 6. Commit Results
+      # 5. Commit Results
       - name: Commit and Push
         if: success()
         run: |
