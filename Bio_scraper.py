@@ -14,7 +14,8 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+# Matching Linux UA to Server OS reduces "Mismatch" flags
+LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # --- PROXY AUTH EXTENSION (MANIFEST V3) ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
@@ -25,12 +26,9 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         host = parsed.hostname
         port = parsed.port
         scheme = parsed.scheme or "http"
-
         if not username or not password: return None
         
-        # USE ABSOLUTE PATH
         abs_plugin_dir = os.path.abspath(plugin_dir)
-        
         if os.path.exists(abs_plugin_dir): shutil.rmtree(abs_plugin_dir)
         os.makedirs(abs_plugin_dir)
 
@@ -44,7 +42,6 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
             "background": {"service_worker": "background.js"}
         }
         """
-
         background_js = f"""
         var config = {{
             mode: "fixed_servers",
@@ -68,11 +65,8 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         """
         with open(os.path.join(abs_plugin_dir, "manifest.json"), "w") as f: f.write(manifest_json)
         with open(os.path.join(abs_plugin_dir, "background.js"), "w") as f: f.write(background_js)
-        
         return abs_plugin_dir
-    except Exception as e:
-        print(f">> Proxy Plugin Error: {e}")
-        return None
+    except: return None
 
 # --- HELPER FUNCTIONS ---
 def get_price_via_ocr(ele):
@@ -88,153 +82,90 @@ def safe_screenshot(page, name):
     except: pass
 
 def get_ip_info(page):
-    """
-    Robust IP checker using lightweight plain-text sources.
-    Returns (ip, source, success_bool)
-    """
-    # Source 1: ifconfig.me (Very fast, plain text)
-    try:
-        page.get("https://ifconfig.me/ip", timeout=30)
-        ip = page.ele('tag:body').text.strip()
-        if len(ip) > 6 and "." in ip:
-            return ip, "ifconfig.me", True
-    except Exception as e:
-        print(f"   > Check 1 failed: {e}")
-
-    # Source 2: icanhazip.com
-    try:
-        page.get("https://icanhazip.com", timeout=30)
-        ip = page.ele('tag:body').text.strip()
-        if len(ip) > 6 and "." in ip:
-            return ip, "icanhazip.com", True
-    except Exception as e:
-        print(f"   > Check 2 failed: {e}")
-
-    return "Unknown", "None", False
-
-def check_connection_safety(page):
-    ip, source, success = get_ip_info(page)
-    
-    print(f">> CONNECTION TEST ({source}): IP={ip}")
-    
-    if not success or ip == "Unknown":
-        print(">> ERROR: Could not verify IP. Internet access blocked.")
-        return False
-        
-    if ip.startswith("20.") or ip.startswith("172.") or ip.startswith("52.") or ip.startswith("40."):
-        print(f">> BLOCKING: IP {ip} looks like Microsoft Azure.")
-        return False
-            
-    print(">> SUCCESS: Connection Verified.")
-    return True
+    # Try multiple sources to verify IP
+    for url in ["https://ifconfig.me/ip", "https://icanhazip.com", "https://api.ipify.org"]:
+        try:
+            page.get(url, timeout=10)
+            ip = page.ele('tag:body').text.strip()
+            if len(ip) > 6 and "." in ip:
+                return ip, True
+        except: continue
+    return "Unknown", False
 
 def is_blocked(page):
     if "blocked" in page.title.lower() or "security service" in page.html.lower():
-        print(">> CRITICAL: Firewall Ban Detected.")
-        safe_screenshot(page, "debug_ban.png")
+        print("   >> DETECTED: Firewall Ban.")
         return True
     return False
 
 def bypass_turnstile(page):
     print(">> Checking Security...")
-    time.sleep(3)
+    time.sleep(2)
     if is_blocked(page): return False
     
     if "Just a moment" in page.title or "robot" in page.title.lower():
-        print(">> Turnstile Challenge Detected. Engaging...")
-        for i in range(25):
+        print(">> Turnstile Challenge Detected...")
+        for i in range(20):
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
                 print(">> SUCCESS! Security Cleared.")
                 return True
-            
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
             if iframe:
-                try:
-                    iframe.ele('tag:body').click() 
-                    time.sleep(2)
+                try: iframe.ele('tag:body').click(); time.sleep(1)
                 except: pass
             time.sleep(1)
         return False
-    print(">> No Challenge Detected.")
     return True
 
 def apply_filters(page):
     print(">> Applying Filters...")
     try:
         if is_blocked(page): return False
-
-        ext_btn = page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10)
-        if not ext_btn:
-            if "/account" in page.url:
-                print(">> Stuck on Dashboard. Redirecting...")
-                page.get("https://namebio.com/")
-                return False
-            raise Exception("Filter UI missing.")
-
-        ext_btn.click()
-        time.sleep(0.5)
+        
+        # Extension
+        page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10).click()
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
-        print("   -> Extension: .com")
-        time.sleep(1)
+        time.sleep(0.5)
 
+        # Venue
         page.ele('css:button[data-id="venue"]').click()
-        time.sleep(0.5)
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
-        print("   -> Venue: GoDaddy")
-        time.sleep(1)
-
-        page.ele('css:button[data-id="date-range"]').click()
         time.sleep(0.5)
-        dates = page.eles('xpath://div[contains(@class, "open")]//ul/li')
-        if len(dates) > 1:
-            dates[1].click()
-            print("   -> Date: Today")
-        time.sleep(1)
 
-        try:
-            page.ele('css:select[name="search-results_length"]').select('25')
-            print("   -> Rows: 25")
-        except:
-            print("   -> Rows: Default")
+        # Date
+        page.ele('css:button[data-id="date-range"]').click()
+        dates = page.eles('xpath://div[contains(@class, "open")]//ul/li')
+        if len(dates) > 1: dates[1].click()
+        time.sleep(0.5)
+
+        # Rows
+        try: page.ele('css:select[name="search-results_length"]').select('25')
+        except: pass
         
         return True
-    except Exception as e:
-        print(f">> Filter Error: {e}")
-        safe_screenshot(page, "debug_filter_fail.png")
-        return False
+    except: return False
 
 def main():
-    print(">> Starting DropDax Scraper (Absolute Path Fix)...")
-    
+    print(">> Starting DropDax Scraper (Rotation Engine)...")
     proxy_url = os.environ.get("PROXY_URL")
     plugin_path = None
-    
     if proxy_url:
-        print(">> Generating Auth Plugin...")
         plugin_path = create_proxy_auth_extension(proxy_url)
-        
-        # VERIFY PLUGIN CREATION
-        if plugin_path and os.path.exists(plugin_path):
-            print(f">> Plugin Created at: {plugin_path}")
-            print(f">> Files: {os.listdir(plugin_path)}")
-        else:
-            print(">> FATAL: Plugin creation failed.")
-            sys.exit(1)
 
-    # --- THE GATEKEEPER LOOP ---
-    page = None
-    clean_connection = False
+    # --- THE ROTATION LOOP ---
+    MAX_ATTEMPTS = 10
+    success = False
     
-    for attempt in range(1, 6): # Try 5 times
-        print(f"\n>> Connection Check (Attempt {attempt}/5)...")
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(f"\n========================================")
+        print(f"   SESSION ATTEMPT {attempt}/{MAX_ATTEMPTS}")
+        print(f"========================================")
         
         co = ChromiumOptions()
+        if plugin_path: co.set_argument(f'--load-extension={plugin_path}')
         
-        # USE DIRECT ARGUMENT INJECTION FOR RELIABILITY
-        if plugin_path: 
-            co.set_argument(f'--load-extension={plugin_path}')
-        
-        co.set_argument(f'--user-agent={WINDOWS_UA}')
+        # Standard Linux Stealth Config
+        co.set_argument(f'--user-agent={LINUX_UA}')
         co.set_argument('--window-size=1920,1080')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
@@ -242,90 +173,89 @@ def main():
         co.set_argument('--disable-blink-features=AutomationControlled') 
         co.set_paths(browser_path='/usr/bin/google-chrome')
         
+        page = None
         try:
-            if page: page.quit()
             page = ChromiumPage(addr_or_opts=co)
             
-            # CHECK IP STRICTLY
-            if check_connection_safety(page):
-                clean_connection = True
-                break
-            else:
-                print(">> Retrying...")
-                
-        except Exception as e:
-            print(f">> Init Failed: {e}")
-            time.sleep(2)
-
-    if not clean_connection:
-        print(">> FATAL: No clean IP found after 5 attempts.")
-        if page: page.quit()
-        sys.exit(1)
-
-    try:
-        # --- EXECUTION PHASE ---
-        print(">> Warming up Trust Score via Google...")
-        page.get("https://www.google.com/search?q=site:namebio.com")
-        time.sleep(2)
-        
-        print(">> Entering NameBio...")
-        page.get("https://namebio.com/")
-        
-        if not bypass_turnstile(page):
-            raise Exception("Banned.")
-
-        try:
-            banner = page.ele('#nudge-countdown-container', timeout=2)
-            if banner: 
-                banner.ele('css:a[data-dismiss="modal"]').click()
-                print(">> Banner Cleared.")
-        except: pass
-
-        if not apply_filters(page):
-            print(">> Retrying Filters...")
-            page.refresh()
-            time.sleep(3)
-            if not apply_filters(page):
-                raise Exception("Filters Failed.")
-
-        print(">> Executing Search...")
-        page.ele('#search-submit').click()
-        
-        print(">> Waiting for Data...")
-        page.wait.ele_displayed('#search-results tbody tr', timeout=30)
-        
-        rows = page.eles('#search-results tbody tr')
-        data = []
-        print(f">> Found {len(rows)} potential rows.")
-
-        for row in rows:
-            if "No matching" in row.text: continue
-            cols = row.eles('tag:td')
-            if len(cols) < 4: continue
-
-            domain = cols[0].text.strip()
-            date = cols[2].text.strip()
-            venue = cols[3].text.strip()
-            price = get_price_via_ocr(cols[1]).replace("USD","").replace("$","").strip()
-
-            print(f"   + {domain} | {price}")
-            data.append([domain, price, date, venue])
-
-        with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Domain", "Price", "Date", "Venue"])
-            writer.writerows(data)
+            # 1. Verify IP (Is Proxy working?)
+            ip, status = get_ip_info(page)
+            print(f">> IP Check: {ip}")
             
-        print(f">> DONE. {len(data)} rows saved.")
+            if not status or ip.startswith("20.") or ip.startswith("172."):
+                print(">> BAD IP. Rotating...")
+                page.quit()
+                continue # Next attempt
+            
+            # 2. Go to NameBio
+            print(">> Approaching Target...")
+            page.get("https://namebio.com/")
+            
+            # 3. Check for Immediate Ban
+            if is_blocked(page):
+                print(">> Hard Block detected on this IP. Rotating...")
+                page.quit()
+                continue # Next attempt (New IP)
+            
+            # 4. Security Check
+            if not bypass_turnstile(page):
+                print(">> Security check failed. Rotating...")
+                page.quit()
+                continue
+                
+            # 5. Clear Banner
+            try:
+                banner = page.ele('#nudge-countdown-container', timeout=2)
+                if banner: banner.ele('css:a[data-dismiss="modal"]').click()
+            except: pass
 
-    except Exception as e:
-        print(f">> FATAL ERROR: {e}")
-        safe_screenshot(page, "debug_fatal.png")
-        sys.exit(1)
+            # 6. Filters
+            if not apply_filters(page):
+                print(">> Filters failed. Rotating...")
+                page.quit()
+                continue
+
+            # 7. Search
+            print(">> Executing Search...")
+            page.ele('#search-submit').click()
+            page.wait.ele_displayed('#search-results tbody tr', timeout=30)
+            
+            # 8. Scrape
+            rows = page.eles('#search-results tbody tr')
+            data = []
+            print(f">> Found {len(rows)} rows. Extracting...")
+
+            for row in rows:
+                if "No matching" in row.text: continue
+                cols = row.eles('tag:td')
+                if len(cols) < 4: continue
+                
+                domain = cols[0].text.strip()
+                date = cols[2].text.strip()
+                venue = cols[3].text.strip()
+                price = get_price_via_ocr(cols[1]).replace("USD","").replace("$","").strip()
+                
+                print(f"   + {domain} | {price}")
+                data.append([domain, price, date, venue])
+
+            with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Domain", "Price", "Date", "Venue"])
+                writer.writerows(data)
+            
+            print(f">> SUCCESS! Saved {len(data)} rows.")
+            success = True
+            break # Exit loop on success
+
+        except Exception as e:
+            print(f">> Crash on attempt {attempt}: {e}")
+            if page: page.quit()
     
-    finally:
-        if page: page.quit()
-        if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin", ignore_errors=True)
+    if not success:
+        print("\n>> FATAL: All 10 attempts failed.")
+        if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin")
+        sys.exit(1)
+        
+    if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin")
 
 if __name__ == "__main__":
     main()
