@@ -1,9 +1,9 @@
-name: DropDax NameBio Scraper (API Mode)
+name: DropDax NameBio Scraper (Android GPU-Kill)
 
 on:
   schedule:
-    - cron: '0 12 * * *'
-  workflow_dispatch:
+    - cron: '0 12 * * *' # Runs every day at 12:00 UTC
+  workflow_dispatch:      # Allows manual trigger
 
 permissions:
   contents: write
@@ -21,28 +21,28 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. Install System Dependencies (Minimal)
-      - name: Install System Deps
+      # 1. INSTALL SYSTEM DEPENDENCIES (Chrome + Tesseract OCR)
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          # We don't need Chrome/XVFB for the API method, but keeping them doesn't hurt
+          sudo apt-get install -y google-chrome-stable tesseract-ocr libtesseract-dev
 
-      # 2. Install Python Libraries (Added typing_extensions)
+      # 2. INSTALL PYTHON LIBRARIES
       - name: Install Python Dependencies
         run: |
-          pip install requests tls_client typing_extensions
+          pip install DrissionPage pytesseract Pillow requests
 
-      # 3. Create Session File (Placeholder)
+      # 3. CREATE SESSION FILE
       - name: Create Session File
         run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
 
-      # 4. Run Scraper (No XVFB needed for API)
+      # 4. RUN SCRAPER (Headless Xvfb)
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
-        run: python Bio_scraper.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python Bio_scraper.py
 
-      # 5. Commit Results
+      # 5. COMMIT RESULTS
       - name: Commit and Push
         if: success()
         run: |
