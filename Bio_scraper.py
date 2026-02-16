@@ -11,7 +11,6 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 
 # --- CONFIGURATION ---
 OUTPUT_FILE = "namebio_data.csv"
-# We match the server OS (Linux) to avoid "OS Mismatch" flags
 UA_LINUX = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # --- PROXY SETUP (Manifest V2) ---
@@ -65,7 +64,6 @@ def get_cookies_via_browser(proxy_url):
     co = ChromiumOptions()
     if plugin_path: co.add_extension(plugin_path)
     
-    # STEALTH SETTINGS
     co.set_argument(f'--user-agent={UA_LINUX}')
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
@@ -94,12 +92,10 @@ def get_cookies_via_browser(proxy_url):
                 print(">> SUCCESS: Challenge Passed!")
                 break
                 
-            # Random mouse wiggle to prove humanity
             try:
                 page.run_js(f"window.scrollBy(0, {random.randint(10, 50)});")
             except: pass
             
-            # Check for iframe click
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=1)
             if iframe:
                 print(f"   > Clicking Turnstile... ({i})")
@@ -111,11 +107,34 @@ def get_cookies_via_browser(proxy_url):
             print(">> FAILED: Timeout waiting for challenge.")
             return None
 
-        # 3. Extract Cookies
-        cookies = page.cookies(as_dict=True)
+        # 3. Extract Cookies (FIXED SYNTAX)
+        print(">> Extracting Cookies...")
+        
+        # Try multiple methods to get the raw list of cookies
+        try:
+            raw_cookies = page.get_cookies() # Method in newer versions
+        except:
+            try:
+                raw_cookies = page.cookies # Property in older versions
+            except:
+                print(">> Error: Could not retrieve cookie object.")
+                return None
+                
+        # Manually convert list of dicts to simple dict {name: value}
+        cookie_dict = {}
+        for c in raw_cookies:
+            # DrissionPage sometimes returns objects, sometimes dicts
+            if isinstance(c, dict):
+                cookie_dict[c.get('name')] = c.get('value')
+            else:
+                # Assuming it's an object with attributes
+                try:
+                    cookie_dict[c.name] = c.value
+                except: pass
+
         ua = page.run_js("return navigator.userAgent")
-        print(f">> Cookies Secured: {len(cookies)} found.")
-        return cookies, ua
+        print(f">> Cookies Secured: {len(cookie_dict)} found.")
+        return cookie_dict, ua
 
     except Exception as e:
         print(f">> Browser Error: {e}")
@@ -127,7 +146,6 @@ def get_cookies_via_browser(proxy_url):
 def scrape_api(cookies, user_agent, proxy_url):
     print("\n>> PHASE 2: API Injection (The Heist)...")
     
-    # Headers matching the browser session EXACTLY
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -137,7 +155,7 @@ def scrape_api(cookies, user_agent, proxy_url):
         "Referer": "https://namebio.com/",
     }
 
-    # Payload matching your filters
+    # API Payload
     payload = {
         "draw": "1",
         "start": "0",
@@ -164,19 +182,26 @@ def scrape_api(cookies, user_agent, proxy_url):
         )
         
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except:
+                print(">> API returned HTML (Cloudflare blocked the API call).")
+                print(resp.text[:200])
+                return None
+                
             rows = data.get("data", [])
             print(f">> SUCCESS! API returned {len(rows)} rows.")
             
             clean_data = []
             for row in rows:
                 domain = row.get('domain', '').split('<')[0].strip()
-                # Price often comes as HTML image or text. Simple fallback:
                 price_raw = row.get('price', '')
-                if "<img" in price_raw:
-                    price = "IMAGE_PRICE" # We can fix this later if needed
+                
+                # Handle Image Prices vs Text Prices
+                if "<img" in str(price_raw):
+                    price = "IMAGE_PRICE" 
                 else:
-                    price = price_raw.replace('$', '').replace(',', '').strip()
+                    price = str(price_raw).replace('$', '').replace(',', '').strip()
                 
                 date = row.get('date', '')
                 venue = row.get('venue', '')
@@ -187,7 +212,6 @@ def scrape_api(cookies, user_agent, proxy_url):
             return clean_data
         else:
             print(f">> API FAILED. Status: {resp.status_code}")
-            # print(resp.text[:500]) # Debug
             return None
 
     except Exception as e:
@@ -198,28 +222,22 @@ def main():
     print(">> Starting DropDax 'Cookie Handoff' Scraper...")
     proxy_url = os.environ.get("PROXY_URL")
     
-    # 1. Initialize CSV
     with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(["Domain", "Price", "Date", "Venue"])
 
-    # 2. Try up to 3 times to get a valid session
     for attempt in range(1, 4):
         print(f"\n=== ATTEMPT {attempt}/3 ===")
         
-        # Step A: Get Cookies
         result = get_cookies_via_browser(proxy_url)
         if not result:
             print(">> Cookie Harvest failed. Rotating...")
             continue
             
         cookies, ua = result
-        
-        # Step B: Use Cookies for API
         data = scrape_api(cookies, ua, proxy_url)
         
         if data:
-            # Step C: Save and Exit
             with open(OUTPUT_FILE, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerows(data)
