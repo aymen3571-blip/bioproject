@@ -13,7 +13,7 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 OUTPUT_FILE = "namebio_data.csv"
 UA_LINUX = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-# --- PROXY SETUP (Manifest V2) ---
+# --- PROXY SETUP ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
     try:
         parsed = urlparse(proxy_string)
@@ -57,8 +57,8 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         return os.path.abspath(plugin_dir)
     except: return None
 
-def get_cookies_via_browser(proxy_url):
-    print(">> PHASE 1: Harvesting Cookies via Browser...")
+def get_cookies_via_cdp(proxy_url):
+    print(">> PHASE 1: Harvesting Cookies via CDP (Direct Engine Access)...")
     plugin_path = create_proxy_auth_extension(proxy_url) if proxy_url else None
     
     co = ChromiumOptions()
@@ -74,14 +74,13 @@ def get_cookies_via_browser(proxy_url):
     page = ChromiumPage(addr_or_opts=co)
     
     try:
-        # 1. Open Site
         print(">> Navigating to NameBio...")
         page.get("https://namebio.com/")
         
-        # 2. Wait for Cloudflare Solve
         print(">> Waiting for Cloudflare Challenge...")
         time.sleep(5)
         
+        # Cloudflare Solver Loop
         for i in range(15):
             title = page.title.lower()
             if "blocked" in title:
@@ -92,45 +91,34 @@ def get_cookies_via_browser(proxy_url):
                 print(">> SUCCESS: Challenge Passed!")
                 break
                 
-            try:
-                page.run_js(f"window.scrollBy(0, {random.randint(10, 50)});")
-            except: pass
-            
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=1)
             if iframe:
                 print(f"   > Clicking Turnstile... ({i})")
                 try: iframe.ele('tag:body').click()
                 except: pass
-            
             time.sleep(2)
         else:
             print(">> FAILED: Timeout waiting for challenge.")
             return None
 
-        # 3. Extract Cookies (ROBUST METHOD)
-        print(">> Extracting Cookies...")
+        # --- THE NUCLEAR OPTION: CDP COOKIE EXTRACTION ---
+        print(">> Executing CDP 'Network.getCookies'...")
+        # This talks directly to Chrome Engine, bypassing all wrappers
+        cookies_obj = page.run_cdp('Network.getCookies')
         
-        # Determine if .cookies is a property or a method
-        raw_cookies = page.cookies
-        if callable(raw_cookies):
-            print("   > Detected cookies as method. Calling...")
-            raw_cookies = raw_cookies()
-        else:
-            print("   > Detected cookies as property.")
-
-        # Convert to standard dict for requests
+        if not cookies_obj or 'cookies' not in cookies_obj:
+            print(">> ERROR: CDP returned no cookies.")
+            return None
+            
+        raw_list = cookies_obj['cookies']
+        print(f">> Cookies Secured: {len(raw_list)} found via CDP.")
+        
+        # Convert to simple dict for requests
         cookie_dict = {}
-        for c in raw_cookies:
-            # Handle both dictionary and object formats
-            if isinstance(c, dict):
-                cookie_dict[c.get('name')] = c.get('value')
-            else:
-                try:
-                    cookie_dict[c.name] = c.value
-                except: pass
+        for c in raw_list:
+            cookie_dict[c['name']] = c['value']
 
         ua = page.run_js("return navigator.userAgent")
-        print(f">> Cookies Secured: {len(cookie_dict)} found.")
         return cookie_dict, ua
 
     except Exception as e:
@@ -152,7 +140,7 @@ def scrape_api(cookies, user_agent, proxy_url):
         "Referer": "https://namebio.com/",
     }
 
-    # Payload
+    # Payload (Last Sold)
     payload = {
         "draw": "1",
         "start": "0",
@@ -183,7 +171,7 @@ def scrape_api(cookies, user_agent, proxy_url):
                 data = resp.json()
             except:
                 print(">> API returned HTML (Cloudflare blocked the API call).")
-                print(resp.text[:200])
+                print(f">> Response Start: {resp.text[:100]}")
                 return None
                 
             rows = data.get("data", [])
@@ -193,11 +181,8 @@ def scrape_api(cookies, user_agent, proxy_url):
             for row in rows:
                 domain = row.get('domain', '').split('<')[0].strip()
                 price_raw = row.get('price', '')
-                
-                if "<img" in str(price_raw):
-                    price = "IMAGE_PRICE" 
-                else:
-                    price = str(price_raw).replace('$', '').replace(',', '').strip()
+                if "<img" in str(price_raw): price = "IMAGE_PRICE" 
+                else: price = str(price_raw).replace('$', '').replace(',', '').strip()
                 
                 date = row.get('date', '')
                 venue = row.get('venue', '')
@@ -215,7 +200,7 @@ def scrape_api(cookies, user_agent, proxy_url):
         return None
 
 def main():
-    print(">> Starting DropDax 'Cookie Handoff' Scraper (Final V2)...")
+    print(">> Starting DropDax 'Cookie Handoff' Scraper (CDP Mode)...")
     proxy_url = os.environ.get("PROXY_URL")
     
     with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
@@ -225,12 +210,17 @@ def main():
     for attempt in range(1, 4):
         print(f"\n=== ATTEMPT {attempt}/3 ===")
         
-        result = get_cookies_via_browser(proxy_url)
+        result = get_cookies_via_cdp(proxy_url)
         if not result:
             print(">> Cookie Harvest failed. Rotating...")
             continue
             
         cookies, ua = result
+        
+        # Check if we got the critical PHPSESSID
+        if 'PHPSESSID' not in cookies:
+             print(">> WARNING: PHPSESSID missing. Session might be invalid.")
+        
         data = scrape_api(cookies, ua, proxy_url)
         
         if data:
