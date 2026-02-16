@@ -5,7 +5,6 @@ import json
 import shutil
 import sys
 import random
-import requests
 import pytesseract
 from PIL import Image
 from io import BytesIO
@@ -15,8 +14,8 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-# We match the Server OS (Linux) for maximum fingerprint consistency
-LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+# We switch to standard Windows 10 for "Corporate User" trust score
+WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # --- PROXY AUTH EXTENSION (MANIFEST V3) ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
@@ -69,23 +68,6 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         return os.path.abspath(plugin_dir)
     except: return None
 
-# --- STEALTH INJECTION ---
-def inject_stealth(page):
-    """
-    Injects JavaScript to scrub automation flags.
-    """
-    page.run_js_loaded("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
-            return getParameter(parameter);
-        };
-    """)
-
 # --- HELPER FUNCTIONS ---
 def get_price_via_ocr(ele):
     try:
@@ -99,34 +81,51 @@ def safe_screenshot(page, name):
     try: page.get_screenshot(path=name)
     except: pass
 
-def check_ip_reputation(page):
+def get_ip_info(page):
     """
-    CRITICAL: Checks ISP to ensure we aren't leaking the GitHub/Azure IP.
+    Robust IP checker using multiple sources.
+    Returns (ip, isp, success_bool)
     """
+    # 1. Try IP-API
     try:
-        # We use ip-api.com via the browser to see exactly what NameBio will see
-        page.get("http://ip-api.com/json", timeout=15)
-        data = json.loads(page.ele('tag:pre').text)
-        
-        ip = data.get('query', 'Unknown')
-        isp = data.get('isp', 'Unknown')
-        org = data.get('org', 'Unknown')
-        
-        print(f">> DETECTED CONNECTION: IP={ip} | ISP={isp} | ORG={org}")
-        
-        # BAD ISP LIST
-        bad_keywords = ["Microsoft", "Azure", "Google", "Amazon", "Datacenter", "DigitalOcean", "Hetzner"]
-        
-        for kw in bad_keywords:
-            if kw.lower() in isp.lower() or kw.lower() in org.lower():
-                print(f">> DANGER: Connected via Datacenter ({kw}). Aborting this attempt.")
-                return False
-                
-        print(">> SUCCESS: Residential/Clean Connection confirmed.")
-        return True
-    except Exception as e:
-        print(f">> IP Check Failed: {e}")
+        page.get("http://ip-api.com/json", timeout=10)
+        if "json" in page.url: # Verify we loaded the JSON
+            data = json.loads(page.ele('tag:pre').text)
+            return data.get('query', 'Unknown'), data.get('isp', 'Unknown'), True
+    except: pass
+
+    # 2. Try IPIFY (Backup)
+    try:
+        page.get("https://api.ipify.org?format=json", timeout=10)
+        if "json" in page.url:
+            data = json.loads(page.ele('tag:pre').text)
+            return data.get('ip', 'Unknown'), "Unknown (Backup)", True
+    except: pass
+
+    return "Unknown", "Unknown", False
+
+def check_connection_safety(page):
+    """
+    STRICT GATEKEEPER: Returns True only if IP is verified residential.
+    """
+    ip, isp, success = get_ip_info(page)
+    
+    print(f">> CONNECTION TEST: IP={ip} | ISP={isp}")
+    
+    if not success or ip == "Unknown":
+        print(">> ERROR: Could not verify IP. Connection unstable.")
         return False
+        
+    # BAD ISP LIST (Datacenters)
+    bad_keywords = ["Microsoft", "Azure", "Google", "Amazon", "Datacenter", "DigitalOcean", "Hetzner", "Unknown"]
+    
+    for kw in bad_keywords:
+        if kw.lower() in isp.lower():
+            print(f">> BLOCKING: Detected Datacenter ISP ({kw}). Unsafe.")
+            return False
+            
+    print(">> SUCCESS: Residential connection verified.")
+    return True
 
 def is_blocked(page):
     if "blocked" in page.title.lower() or "security service" in page.html.lower():
@@ -149,7 +148,6 @@ def bypass_turnstile(page):
             
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
             if iframe:
-                print(f">> Widget Found. Clicking... ({i}s)")
                 try:
                     iframe.ele('tag:body').click() 
                     time.sleep(2)
@@ -166,7 +164,7 @@ def apply_filters(page):
 
         ext_btn = page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10)
         if not ext_btn:
-            if "/account" in page.url or "dashboard" in page.url:
+            if "/account" in page.url:
                 print(">> Stuck on Dashboard. Redirecting...")
                 page.get("https://namebio.com/")
                 return False
@@ -205,7 +203,7 @@ def apply_filters(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (The Gatekeeper)...")
+    print(">> Starting DropDax Scraper (Strict Gatekeeper V2)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     plugin_path = None
@@ -215,11 +213,11 @@ def main():
         plugin_path = create_proxy_auth_extension(proxy_url)
 
     # --- THE GATEKEEPER LOOP ---
-    # We will NOT proceed until we get a Clean IP.
     page = None
     clean_connection = False
     
-    for attempt in range(1, 6): # Try 5 times
+    # Try up to 5 times to get a clean proxy
+    for attempt in range(1, 6): 
         print(f"\n>> Connection Check (Attempt {attempt}/5)...")
         
         co = ChromiumOptions()
@@ -227,55 +225,47 @@ def main():
             co.add_extension(plugin_path)
             co.set_argument(f'--load-extension={plugin_path}')
         
-        # Honest Linux User Agent (Matches Server)
-        co.set_argument(f'--user-agent={LINUX_UA}')
+        co.set_argument(f'--user-agent={WINDOWS_UA}')
         co.set_argument('--window-size=1920,1080')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--lang=en-US')
+        # This argument is critical for stealth
+        co.set_argument('--disable-blink-features=AutomationControlled') 
         co.set_paths(browser_path='/usr/bin/google-chrome')
         
         try:
             if page: page.quit()
             page = ChromiumPage(addr_or_opts=co)
             
-            # Inject Stealth
-            inject_stealth(page)
-            
-            # CHECK ISP (The most important step)
-            if check_ip_reputation(page):
+            # CHECK IP STRICTLY
+            if check_connection_safety(page):
                 clean_connection = True
                 break
             else:
-                print(">> Rotating Proxy...")
+                print(">> Retrying for better IP...")
                 
         except Exception as e:
             print(f">> Init Failed: {e}")
             time.sleep(2)
 
     if not clean_connection:
-        print(">> FATAL: Could not acquire a clean Residential IP. Aborting.")
+        print(">> FATAL: No clean IP found. Aborting to protect account.")
         if page: page.quit()
         sys.exit(1)
 
     try:
         # --- EXECUTION PHASE ---
-        # Only reached if IP is clean.
-        
-        # 1. Google Warm-up
-        print(">> Warming up Trust Score via Google...")
-        page.get("https://www.google.com/search?q=site:namebio.com")
+        print(">> Connection Secure. Warming up...")
+        page.get("https://www.google.com")
         time.sleep(2)
         
-        # 2. Entry
         print(">> Entering NameBio...")
         page.get("https://namebio.com/")
         
-        # 3. Security Check
         if not bypass_turnstile(page):
             raise Exception("Banned.")
 
-        # 4. Banner Clear
         try:
             banner = page.ele('#nudge-countdown-container', timeout=2)
             if banner: 
@@ -283,7 +273,6 @@ def main():
                 print(">> Banner Cleared.")
         except: pass
 
-        # 5. Filters
         if not apply_filters(page):
             print(">> Retrying Filters...")
             page.refresh()
@@ -291,7 +280,6 @@ def main():
             if not apply_filters(page):
                 raise Exception("Filters Failed.")
 
-        # 6. Scrape
         print(">> Executing Search...")
         page.ele('#search-submit').click()
         
