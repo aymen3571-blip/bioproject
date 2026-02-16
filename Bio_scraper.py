@@ -4,51 +4,57 @@ import os
 import time
 from bs4 import BeautifulSoup
 
-# This now loads your SCRAPINGANT key
-API_KEY = os.getenv("SCRAPE_DO_TOKEN") 
+# 1. SAFER KEY LOADING: We use .strip() to remove invisible spaces/newlines
+API_KEY = os.getenv("SCRAPE_DO_TOKEN", "").strip()
 
 def main():
     print(">> Starting NameBio Scrape via ScrapingAnt...")
-
-    # We scrape the homepage because it has the "Latest Sales" table
-    target_url = "https://namebio.com"
     
-    # ScrapingAnt API Endpoint
+    if not API_KEY:
+        print(">> CRITICAL ERROR: API Key is missing or empty.")
+        exit(1)
+
+    target_url = "https://namebio.com"
     api_url = "https://api.scrapingant.com/v2/general"
 
-    # ScrapingAnt Parameters:
-    # 'browser': true -> Spins up a real Chrome browser (Critical for NameBio)
-    # 'proxy_type': residential -> Uses real home IPs to avoid "Robot" blocks
-    # 'return_page_source': true -> Returns the HTML after the JS loads
+    # 2. SIMPLIFIED PARAMETERS
+    # We removed 'wait_for_selector' because it was causing empty responses.
+    # We added 'return_page_source' to ensure we get the HTML.
     params = {
         "x-api-key": API_KEY,
         "url": target_url,
         "browser": "true",
         "proxy_type": "residential", 
-        "wait_for_selector": "#sales-table", # Wait until the table actually appears
-        "timeout": "60" # Allow extra time for the browser to load
+        "return_page_source": "true" 
     }
 
     try:
-        print(">> Sending request to ScrapingAnt (Browser + Residential)...")
-        response = requests.get(api_url, params=params)
+        print(">> Sending request...")
+        response = requests.get(api_url, params=params, timeout=120)
 
+        # 3. DEBUGGING THE RESPONSE
         if response.status_code == 200:
-            # ScrapingAnt returns a JSON object where the HTML is in the "content" field
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError:
+                print(">> ERROR: The API returned 200 OK but the body was not JSON.")
+                print(f">> Raw Response: {response.text[:500]}") # Print what we actually got
+                exit(1)
+
             html_content = data.get("content", "")
             
             if not html_content:
-                print(">> Error: Received empty content from ScrapingAnt.")
+                print(">> Error: ScrapingAnt returned empty HTML content.")
+                print(f">> Full API Response: {data}")
                 exit(1)
 
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # --- PARSING LOGIC ---
+            # --- PARSING ---
             table = soup.find('table', id='sales-table')
             
-            # Backup search if ID is missing
             if not table:
+                # Backup search
                 for t in soup.find_all('table'):
                     th = t.find('th')
                     if th and "Domain" in th.get_text():
@@ -56,12 +62,12 @@ def main():
                         break
             
             if not table:
-                print(">> CRITICAL: Table not found. We might still be blocked.")
+                print(">> CRITICAL: Table not found. We might be blocked.")
                 print(">> Page Title:", soup.title.string if soup.title else "No Title")
                 exit(1)
 
             rows = table.find('tbody').find_all('tr')
-            print(f">> Found {len(rows)} sales. Filtering for GoDaddy/.com...")
+            print(f">> Found {len(rows)} sales. Filtering...")
 
             filtered_sales = []
             for row in rows:
