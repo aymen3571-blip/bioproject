@@ -14,7 +14,8 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+# We match the Server OS (Linux) to avoid "Fingerprint Mismatch"
+LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # --- PROXY AUTH EXTENSION (MANIFEST V3) ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
@@ -53,9 +54,7 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
                 bypassList: ["localhost"]
             }}
         }};
-
         chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-
         chrome.webRequest.onAuthRequired.addListener(
             function(details) {{
                 return {{authCredentials: {{username: "{username}", password: "{password}"}}}};
@@ -68,6 +67,38 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
         with open(os.path.join(plugin_dir, "background.js"), "w") as f: f.write(background_js)
         return os.path.abspath(plugin_dir)
     except: return None
+
+# --- STEALTH INJECTION (THE FIX) ---
+def inject_stealth(page):
+    """
+    Injects JavaScript to hide the 'Headless' flags that trigger the ban.
+    """
+    page.run_js_loaded("""
+        // 1. Overwrite the 'webdriver' property
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+
+        // 2. Mock Plugins (Headless chrome has 0 plugins, we fake 3)
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3]
+        });
+
+        // 3. Mock Languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+        
+        // 4. WebGL Vendor Spoofing (Hide 'Mesa' driver)
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            // 37445: UNMASKED_VENDOR_WEBGL
+            if (parameter === 37445) return 'Intel Inc.';
+            // 37446: UNMASKED_RENDERER_WEBGL
+            if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+            return getParameter(parameter);
+        };
+    """)
 
 # --- HELPER FUNCTIONS ---
 def get_price_via_ocr(ele):
@@ -96,15 +127,19 @@ def bypass_turnstile(page):
     
     if "Just a moment" in page.title or "robot" in page.title.lower():
         print(">> Turnstile Challenge Detected. Engaging...")
-        for i in range(20):
+        for i in range(25):
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
                 print(">> SUCCESS! Security Cleared.")
                 return True
             
+            # DrissionPage iframe handling
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
             if iframe:
-                print(f">> Widget Found. Touching... ({i}s)")
+                print(f">> Widget Found. Clicking... ({i}s)")
                 try:
+                    # Random offset click
+                    box = iframe.rect
+                    # We can click the body of the iframe directly
                     iframe.ele('tag:body').click() 
                     time.sleep(2)
                 except: pass
@@ -113,16 +148,17 @@ def bypass_turnstile(page):
     print(">> No Challenge Detected.")
     return True
 
-def apply_filters_mobile(page):
-    print(">> Applying Filters (Mobile Layout)...")
+def apply_filters(page):
+    print(">> Applying Filters (Desktop Layout)...")
     try:
         if is_blocked(page): return False
 
+        # 1. Extension -> .com
         ext_btn = page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10)
         if not ext_btn:
-            if "/account" in page.url:
+            if "/account" in page.url or "dashboard" in page.url:
                 print(">> Stuck on Dashboard. Redirecting...")
-                page.get("https://namebio.com/last-sold")
+                page.get("https://namebio.com/")
                 return False
             raise Exception("Filter UI missing.")
 
@@ -132,12 +168,14 @@ def apply_filters_mobile(page):
         print("   -> Extension: .com")
         time.sleep(1)
 
+        # 2. Venue -> GoDaddy
         page.ele('css:button[data-id="venue"]').click()
         time.sleep(0.5)
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
         print("   -> Venue: GoDaddy")
         time.sleep(1)
 
+        # 3. Date -> Today
         page.ele('css:button[data-id="date-range"]').click()
         time.sleep(0.5)
         dates = page.eles('xpath://div[contains(@class, "open")]//ul/li')
@@ -146,6 +184,7 @@ def apply_filters_mobile(page):
             print("   -> Date: Today")
         time.sleep(1)
 
+        # 4. Rows -> 25
         try:
             page.ele('css:select[name="search-results_length"]').select('25')
             print("   -> Rows: 25")
@@ -159,34 +198,30 @@ def apply_filters_mobile(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Proxy Gate V3)...")
+    print(">> Starting DropDax Scraper (Consistency Protocol)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     plugin_path = None
     
-    # 1. SETUP PROXY PLUGIN
+    # 1. PROXY SETUP
     if proxy_url:
-        print(">> Generaring Auth Plugin...")
+        print(">> Generating Auth Plugin...")
         plugin_path = create_proxy_auth_extension(proxy_url)
 
-    # 2. BROWSER SETUP LOOP (THE PROXY GATE)
-    # We try up to 3 times to get a clean IP before starting the scrape
+    # 2. BROWSER SETUP (PROXY GATE)
     page = None
     proxy_working = False
     
     for attempt in range(1, 4):
         print(f"\n>> Connection Check (Attempt {attempt}/3)...")
-        
         co = ChromiumOptions()
-        # Force load the extension
         if plugin_path: 
             co.add_extension(plugin_path)
-            # FORCE the flag as well
             co.set_argument(f'--load-extension={plugin_path}')
         
-        co.set_argument(f'--user-agent={MOBILE_UA}')
-        co.set_argument('--window-size=390,844')
-        co.set_argument('--touch-events=enabled')
+        # KEY CHANGE: Honest Linux User Agent
+        co.set_argument(f'--user-agent={LINUX_UA}')
+        co.set_argument('--window-size=1920,1080')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--lang=en-US')
@@ -196,47 +231,49 @@ def main():
             if page: page.quit()
             page = ChromiumPage(addr_or_opts=co)
             
+            # INJECT STEALTH IMMEDIATELY
+            inject_stealth(page)
+            
             # CHECK IP
             page.get("https://api.ipify.org", timeout=15)
             current_ip = page.ele('tag:body').text.strip()
             print(f">> Visible IP: {current_ip}")
             
-            # Simple check for Azure/Microsoft ranges (Starts with 20. or 13. or 40.)
-            # This is a heuristic; GitHub Actions usually uses these ranges.
             if current_ip.startswith("20.") or current_ip.startswith("172.") or current_ip.startswith("40."):
-                print(">> BAD IP DETECTED (Azure/Datacenter). Retrying...")
+                print(">> BAD IP (Azure). Retrying...")
                 continue
             else:
-                print(">> GOOD IP DETECTED (Likely Proxy). Proceeding...")
+                print(">> GOOD IP. Proceeding...")
                 proxy_working = True
                 break
-                
         except Exception as e:
-            print(f">> Browser Init Failed: {e}")
+            print(f">> Init Failed: {e}")
             time.sleep(2)
 
     if not proxy_working:
-        print("\n>> FATAL: Could not establish secure proxy connection. Aborting to protect cookies.")
-        if page: page.quit()
+        print(">> FATAL: Proxy Failed.")
         sys.exit(1)
 
-    # 3. SCRAPE SEQUENCE
     try:
-        print(">> Starting Mobile Session...")
-        print(">> Infiltrating via Side Door (/last-sold)...")
+        # --- SESSION HANDLING ---
+        # NO COOKIES: We scrape as Guest first to establish trust.
         
-        # CLEAR COOKIES for this session to ensure we don't carry 'banned' state
-        try: page.run_cdp('Network.clearBrowserCookies')
-        except: pass
+        # --- GOOGLE REFERER STRATEGY ---
+        print(">> Building Trust (Google Referer)...")
+        page.get("https://www.google.com/search?q=namebio+last+sold")
+        time.sleep(2)
         
+        print(">> Entering NameBio...")
         page.get("https://namebio.com/last-sold")
         
+        # --- SECURITY CHECK ---
         if not bypass_turnstile(page):
-            print(">> Retrying with Root URL...")
+            print(">> Retrying Root...")
             page.get("https://namebio.com/")
             if not bypass_turnstile(page):
                 raise Exception("Banned.")
 
+        # --- BANNER ---
         try:
             banner = page.ele('#nudge-countdown-container', timeout=2)
             if banner: 
@@ -244,11 +281,12 @@ def main():
                 print(">> Banner Cleared.")
         except: pass
 
-        if not apply_filters_mobile(page):
+        # --- FILTER & SEARCH ---
+        if not apply_filters(page):
             print(">> Retrying Filters...")
             page.refresh()
             time.sleep(3)
-            if not apply_filters_mobile(page):
+            if not apply_filters(page):
                 raise Exception("Filters Failed.")
 
         print(">> Executing Search...")
