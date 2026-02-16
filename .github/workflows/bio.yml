@@ -1,9 +1,9 @@
-name: DropDax NameBio Scraper (Android GPU-Kill)
+name: DropDax NameBio Scraper (FlareSolverr)
 
 on:
   schedule:
-    - cron: '0 12 * * *' # Runs every day at 12:00 UTC
-  workflow_dispatch:      # Allows manual trigger
+    - cron: '*/30 * * * *' # Run every 30 mins to catch new sales
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +11,17 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
+    # --- THIS IS THE MAGIC SAUCE ---
+    services:
+      flaresolverr:
+        image: flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        environment:
+          LOG_LEVEL: info
+          TZ: America/New_York
+    # -------------------------------
 
     steps:
       - name: Checkout Code
@@ -21,28 +32,18 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. INSTALL SYSTEM DEPENDENCIES (Chrome + Tesseract OCR)
-      - name: Install System Dependencies
+      # 1. Install Dependencies
+      - name: Install Python Libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable tesseract-ocr libtesseract-dev
+          pip install requests beautifulsoup4
 
-      # 2. INSTALL PYTHON LIBRARIES
-      - name: Install Python Dependencies
-        run: |
-          pip install DrissionPage pytesseract Pillow requests
-
-      # 3. CREATE SESSION FILE
-      - name: Create Session File
-        run: echo '${{ secrets.NAMEBIO_COOKIES }}' > namebio_session.json
-
-      # 4. RUN SCRAPER (Headless Xvfb)
+      # 2. Run Scraper (No XVFB needed!)
       - name: Run Scraper
         env: 
           PROXY_URL: ${{ secrets.PROXY_URL }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python Bio_scraper.py
+        run: python Bio_scraper.py
 
-      # 5. COMMIT RESULTS
+      # 3. Commit Results
       - name: Commit and Push
         if: success()
         run: |
