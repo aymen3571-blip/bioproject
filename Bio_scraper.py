@@ -22,10 +22,11 @@ def main():
     params = {
         "token": API_TOKEN,
         "url": target_url,
-        "render": "true" 
+        "super": "true"      # <-- ADD THIS (Uses Residential IPs to bypass Cloudflare)
     }
 
-    print(">> Calling Scrape.do API...")
+    print(">> Calling Scrape.do API (Super Mode)...")
+    # We send the payload (search options) normally, Scrape.do forwards it
     response = requests.post(api_url, params=params, data=payload, timeout=60)
     
     if response.status_code == 200:
