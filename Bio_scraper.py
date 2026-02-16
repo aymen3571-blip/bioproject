@@ -3,6 +3,7 @@ import csv
 import time
 import json
 import shutil
+import sys
 import pytesseract
 from PIL import Image
 from io import BytesIO
@@ -13,9 +14,12 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
 
-# --- PROXY AUTH EXTENSION GENERATOR ---
+# --- MANIFEST V3 PROXY EXTENSION GENERATOR ---
 def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
-    """Creates a temporary Chrome extension to handle Proxy Authentication."""
+    """
+    Creates a Manifest V3 Chrome extension for Proxy Authentication.
+    Required for modern Chrome versions (2024+).
+    """
     try:
         parsed = urlparse(proxy_string)
         username = parsed.username
@@ -31,27 +35,27 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
             shutil.rmtree(plugin_dir)
         os.makedirs(plugin_dir)
 
+        # 1. Manifest V3 (Modern Standard)
         manifest_json = """
         {
+            "name": "Proxy Auth V3",
             "version": "1.0.0",
-            "manifest_version": 2,
-            "name": "Chrome Proxy Auth",
+            "manifest_version": 3,
             "permissions": [
                 "proxy",
-                "tabs",
-                "unlimitedStorage",
-                "storage",
-                "<all_urls>",
                 "webRequest",
-                "webRequestBlocking"
+                "webRequestAuthProvider"
+            ],
+            "host_permissions": [
+                "<all_urls>"
             ],
             "background": {
-                "scripts": ["background.js"]
-            },
-            "minimum_chrome_version": "22.0.0"
+                "service_worker": "background.js"
+            }
         }
         """
 
+        # 2. Service Worker (Background Script)
         background_js = f"""
         var config = {{
             mode: "fixed_servers",
@@ -67,17 +71,15 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
 
         chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
 
-        function callbackFn(details) {{
-            return {{
-                authCredentials: {{
-                    username: "{username}",
-                    password: "{password}"
-                }}
-            }};
-        }}
-
         chrome.webRequest.onAuthRequired.addListener(
-            callbackFn,
+            function(details) {{
+                return {{
+                    authCredentials: {{
+                        username: "{username}",
+                        password: "{password}"
+                    }}
+                }};
+            }},
             {{urls: ["<all_urls>"]}},
             ['blocking']
         );
@@ -113,14 +115,19 @@ def safe_screenshot(page, name):
     except:
         pass
 
+def check_for_hard_block(page):
+    """Checks if we are on the 'Sorry, you have been blocked' page."""
+    if "blocked" in page.title.lower() or "security service" in page.html.lower():
+        print(">> CRITICAL: Detected Hard Block (Firewall Ban).")
+        safe_screenshot(page, "debug_hard_block.png")
+        return True
+    return False
+
 def bypass_turnstile(page):
     print(">> Checking for Cloudflare Turnstile...")
     time.sleep(3)
     
-    # Quick check for Hard Block
-    if "blocked" in page.title.lower() or "security service" in page.html.lower():
-        print(">> CRITICAL: Detected Hard Block (Firewall Ban).")
-        safe_screenshot(page, "debug_hard_block.png")
+    if check_for_hard_block(page):
         return False
 
     if "Just a moment" not in page.title and "robot" not in page.title.lower():
@@ -129,7 +136,6 @@ def bypass_turnstile(page):
 
     print(">> Challenge Detected! Scanning...")
     
-    # Try for 25 seconds
     for i in range(25):
         try:
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
@@ -152,14 +158,15 @@ def bypass_turnstile(page):
 def apply_filters(page):
     print(">> Applying Search Filters...")
     try:
+        if check_for_hard_block(page):
+             raise Exception("Hard Block detected before filters.")
+
         # 1. Extension -> .com
         ext_btn = page.ele('css:button[data-id="extension"]', timeout=5)
         if not ext_btn:
-             # Check if we were redirected to Dashboard
              if "account" in page.url or "dashboard" in page.url:
                  print(">> Filters not found (We are on Dashboard).")
                  return False
-             
              safe_screenshot(page, "debug_no_filters.png")
              raise Exception("Filters did not load.")
         
@@ -198,41 +205,43 @@ def apply_filters(page):
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Professional Diagnostic Mode)...")
+    print(">> Starting DropDax Scraper (Manifest V3 Fix)...")
     
     proxy_url = os.environ.get("PROXY_URL")
     
     co = ChromiumOptions()
     
-    # 1. SETUP PROXY
+    # 1. SETUP PROXY (V3 Extension)
     if proxy_url:
-        print(">> PROXY DETECTED. Generating Auth Extension...")
+        print(">> PROXY DETECTED. Generating V3 Auth Extension...")
         auth_plugin_path = create_proxy_auth_extension(proxy_url)
         if auth_plugin_path:
             co.add_extension(auth_plugin_path)
-        else:
-            co.set_proxy(proxy_url)
     
-    # 2. PROFESSIONAL STEALTH ARGUMENTS
-    # We remove the specific user-agent to let Chrome match the binary version naturally
+    # 2. STEALTH ARGUMENTS
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--lang=en-US')
     co.set_argument('--disable-blink-features=AutomationControlled') 
     
-    # Explicitly set browser path
     co.set_paths(browser_path='/usr/bin/google-chrome')
 
     page = ChromiumPage(addr_or_opts=co)
     
     try:
-        # --- PRE-FLIGHT CHECK (CRITICAL) ---
+        # --- PRE-FLIGHT CHECK (IP VERIFICATION) ---
         print(">> Running Pre-Flight IP Diagnostic...")
-        # We visit a neutral site to verify the proxy is working
-        page.get("https://api.ipify.org")
-        print(f">> Current Public IP: {page.ele('tag:body').text}")
+        page.get("https://api.ipify.org", timeout=30)
+        current_ip = page.ele('tag:body').text
+        print(f">> Current Public IP: {current_ip}")
         
+        # KILL SWITCH: If IP is Azure (starts with 172. or 20.), STOP IMMEDIATELY
+        if current_ip.startswith("172.") or current_ip.startswith("20.") or "Microsoft" in current_ip:
+            print(">> FATAL ERROR: Proxy failed. Detected Datacenter IP.")
+            print(">> Aborting to protect cookies.")
+            sys.exit(1)
+
         # --- LOGIN VIA COOKIES ---
         print(">> Injecting Cookies...")
         if os.path.exists(COOKIES_FILE):
@@ -245,7 +254,7 @@ def main():
         
         # --- NAVIGATE ---
         print(">> Navigating to NameBio...")
-        page.set.window.max() # Maximize window to look "Human"
+        page.set.window.max()
         page.get("https://namebio.com/")
         
         # --- CHECK BLOCKS ---
