@@ -1,398 +1,269 @@
 import os
-import json
 import csv
 import time
 import random
-import sys
-from urllib.parse import urlparse
-import subprocess
-
-# --- LIBRARY FIX ---
+import json
 import pytesseract
 from PIL import Image
 from io import BytesIO
-from playwright.sync_api import sync_playwright
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-MAX_RETRIES = 3 
 
-# --- STEALTH FUNCTIONS ---
-def add_stealth_js(context):
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    """)
+# --- HELPER FUNCTIONS ---
 
-# --- ADVANCED NATIVE STEALTH ---
-def apply_advanced_stealth(page):
-    """
-    Injects specific JavaScript overrides to mask the bot.
-    Includes WebGL spoofing which is crucial for Cloudflare.
-    """
-    
-    # 1. Mask the WebDriver flag (The #1 detection method)
-    page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-    """)
-
-    # 2. Mock the Chrome Object (So it looks like Google Chrome, not a script)
-    page.add_init_script("""
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-    """)
-
-    # 3. Spoof WebGL Vendor (CRITICAL FOR CLOUDFLARE)
-    page.add_init_script("""
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            // 37445 = UNMASKED_VENDOR_WEBGL
-            if (parameter === 37445) {
-                return 'Intel Inc.';
-            }
-            // 37446 = UNMASKED_RENDERER_WEBGL
-            if (parameter === 37446) {
-                return 'Intel(R) Iris(TM) Plus Graphics 640';
-            }
-            return getParameter(parameter);
-        };
-    """)
-
-    # 4. Mock Plugins (Bots have 0 plugins, Humans have PDF viewers etc)
-    page.add_init_script("""
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-    """)
-
-    # 5. Fix Window Dimensions (Headless windows sometimes report 0)
-    page.add_init_script("""
-        Object.defineProperty(window, 'outerWidth', { value: window.innerWidth });
-        Object.defineProperty(window, 'outerHeight', { value: window.innerHeight });
-    """)
-
-    # 6. Mask Permissions
-    page.add_init_script("""
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
-    """)
-
-def human_mouse_move(page):
+def get_price_via_ocr(ele):
+    """Takes a screenshot of the price element and OCRs it."""
     try:
-        # Move mouse to random positions to simulate human 'hesitation'
-        for _ in range(random.randint(2, 4)):
-            x = random.randint(100, 1000)
-            y = random.randint(100, 800)
-            page.mouse.move(x, y, steps=10)
-            time.sleep(random.uniform(0.1, 0.3))
-    except:
-        pass
-
-def get_price_via_ocr(cell_element):
-    try:
-        # animations="disabled" helps stability
-        png_bytes = cell_element.screenshot(animations="disabled")
+        # DrissionPage can get bytes directly
+        png_bytes = ele.get_screenshot(as_bytes=True)
         image = Image.open(BytesIO(png_bytes))
+        # --psm 7 treats the image as a single text line
         text = pytesseract.image_to_string(image, config='--psm 7').strip()
         return text
-    except:
+    except Exception as e:
+        print(f"   [OCR Error] {e}")
         return "OCR_ERROR"
 
-def load_cookies(context):
-    if os.path.exists(COOKIES_FILE):
-        try:
-            with open(COOKIES_FILE, 'r') as f:
-                data = json.load(f)
-                cookies = data['cookies'] if isinstance(data, dict) and 'cookies' in data else data
-                context.add_cookies(cookies)
-            print(">> Cookies injected.")
-        except Exception as e:
-            print(f">> Cookie error: {e}")
-
-# --- ENHANCED CLOUDFLARE BYPASS (INFINITE HUNTER MODE) ---
-def bypass_challenge(page, is_round_2=False):
-    print(f">> CHECKING FOR CLOUDFLARE CHALLENGE (Round 2: {is_round_2})...")
+def bypass_turnstile(page):
+    """
+    Scans for Cloudflare Turnstile widget and clicks it.
+    DrissionPage handles iframes much better than Playwright.
+    """
+    print(">> Checking for Cloudflare Turnstile...")
     
-    # 0. WAIT FOR LOAD (Crucial for Round 2)
-    time.sleep(5)
+    # Give it a moment to render
+    time.sleep(3)
     
-    # Check if we are even on a challenge page
-    title = page.title().lower()
-    if "robot" not in title and "moment" not in title and "attention" not in title:
-        print(">> No challenge detected (Clean entry).")
+    # Check if we are blocked
+    if "Just a moment" not in page.title and "robot" not in page.title.lower():
+        print(">> No challenge detected.")
         return True
 
-    # START THE HUNTER LOOP (Max 60 seconds)
-    print(">> Starting Hunter Loop (60s)...")
+    print(">> Challenge Detected! Scanning for widget...")
     
-    for i in range(60):
-        # 1. CHECK SUCCESS (Did we get through?)
-        if "robot" not in page.title().lower():
-            print(">> SUCCESS! Challenge passed.")
-            return True
-        
-        # 2. SCAN FOR WIDGET
-        turnstile_frame = None
-        for frame in page.frames:
-            if "cloudflare" in frame.url or "turnstile" in frame.url:
-                turnstile_frame = frame
-                break
-        
-        # 3. CLICK IF FOUND
-        if turnstile_frame:
-            try:
-                box = turnstile_frame.frame_element().bounding_box()
-                if box:
-                    # Log finding only once to avoid spam
-                    if i % 10 == 0: print(f">> Widget detected. Clicking... ({i}s)")
-                    
-                    click_x = box['x'] + (box['width'] / 2)
-                    click_y = box['y'] + (box['height'] / 2)
-                    page.mouse.move(click_x, click_y, steps=5)
-                    page.mouse.click(click_x, click_y)
-                else:
-                    turnstile_frame.click("body", force=True)
-            except:
-                pass
-        
-        # 4. EMERGENCY EXIT (ROUND 1 ONLY)
-        # Only try Member Login if we are NOT in Round 2 (to avoid loops)
-        if not is_round_2 and i > 20 and i % 5 == 0:
-            try:
-                login_link = page.get_by_text("Member Login")
-                if login_link.count() > 0:
-                    print(">> Taking Emergency Exit (Member Login)...")
-                    login_link.click()
-                    return True # Let the main loop handle the redirect
-            except:
-                pass
+    # Try for 30 seconds
+    for i in range(30):
+        try:
+            # 1. Check success
+            if "Just a moment" not in page.title and "robot" not in page.title.lower():
+                print(">> SUCCESS! Challenge passed.")
+                return True
 
-        # 5. ALIVE SIGNAL
-        if i % 5 == 0: 
-            human_mouse_move(page)
-        
-        time.sleep(1)
-
-    # Final check
-    if "robot" in page.title().lower():
-        print(">> FAILED: Still blocked after 60s.")
+            # 2. Find the iframe
+            # DrissionPage can search for elements inside specific iframes easily
+            iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
+            
+            if iframe:
+                print(f">> Found Turnstile Iframe. Attempting click... ({i}s)")
+                
+                # 3. Click the checkbox inside the iframe
+                # We target the body or the specific checkbox wrapper
+                body = iframe.ele('tag:body', timeout=2)
+                if body:
+                    # Click slightly offset from center to look human
+                    body.click(by_js=False) 
+                    time.sleep(2)
+            
+            time.sleep(1)
+            
+        except Exception as e:
+            pass
+            
+    # Final Check
+    if "Just a moment" in page.title:
+        print(">> FAILED: Cloudflare stuck.")
         return False
         
     return True
 
-def connect_with_retries(page, url, retries=3):
-    """Tries to load the page with extended timeouts."""
-    for attempt in range(1, retries + 1):
-        try:
-            print(f">> Connection Attempt {attempt}/{retries}...")
-            # Use 'domcontentloaded' to return faster
-            page.goto(url, timeout=90000, wait_until="domcontentloaded") 
-            
-            # Check for immediate chrome error (proxy failure)
-            if "chrome-error" in page.url:
-                raise Exception("Proxy dropped connection (Chrome Error).")
+def apply_filters(page):
+    """
+    Interacts with the NameBio UI to set filters manually.
+    """
+    print(">> Applying Search Filters...")
+    
+    try:
+        # 1. Extension -> .com
+        # Find the button by its data-id
+        ext_btn = page.ele('css:button[data-id="extension"]', timeout=5)
+        if not ext_btn:
+            raise Exception("Extension button not found (Page load error?)")
+        
+        ext_btn.click()
+        time.sleep(0.5)
+        
+        # Click the .com option in the dropdown list
+        # We look for the open dropdown
+        page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
+        time.sleep(1)
+        print("   -> Extension set to .com")
 
-            time.sleep(5)
-            return True
-        except Exception as e:
-            print(f">> Attempt {attempt} failed: {e}")
-            if attempt < retries:
-                time.sleep(10)
-            else:
-                return False
-    return False
+        # 2. Venue -> GoDaddy
+        venue_btn = page.ele('css:button[data-id="venue"]')
+        venue_btn.click()
+        time.sleep(0.5)
+        
+        page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
+        time.sleep(1)
+        print("   -> Venue set to GoDaddy")
+
+        # 3. Date -> Today (First Option)
+        # The user requested the first option in the list.
+        date_btn = page.ele('css:button[data-id="date-range"]')
+        date_btn.click()
+        time.sleep(0.5)
+        
+        # Select the 2nd LI (Index 1) because Index 0 is usually 'Any' or a header
+        # DrissionPage element search finds the list in the open container
+        date_options = page.eles('xpath://div[contains(@class, "open")]//ul/li')
+        if len(date_options) > 1:
+            # Click the second item (the first real date)
+            date_options[1].click()
+            print("   -> Date set to Today (First Option)")
+        else:
+            print("   [!] Could not find date options.")
+        time.sleep(1)
+
+        # 4. Rows -> 25
+        # This is a <select> element
+        sel = page.ele('css:select[name="search-results_length"]')
+        sel.select('25')
+        print("   -> Rows set to 25")
+        time.sleep(2)
+
+    except Exception as e:
+        print(f">> Error applying filters: {e}")
+        page.get_screenshot(path="debug_filter_error.png")
+        raise e
 
 def main():
-    print(">> Starting DropDax Proxy Scraper (Infinite Hunter Fix)...")
+    print(">> Starting DropDax Scraper (DrissionPage Engine)...")
     
-    proxy_url = os.environ.get("PROXY_URL") 
+    proxy_url = os.environ.get("PROXY_URL")
     
-    launch_options = {
-        "headless": False, 
-        "args": [
-            "--no-sandbox",
-            "--ignore-certificate-errors",
-            "--disable-infobars",
-            "--disable-blink-features=AutomationControlled",
-            "--enable-features=NetworkService,NetworkServiceInProcess",
-            "--window-size=1920,1080"
-        ]
-    }
-
+    # --- SETUP CHROMIUM OPTIONS ---
+    co = ChromiumOptions()
+    
+    # 1. Set Proxy
     if proxy_url:
         print(">> PROXY DETECTED.")
+        # DrissionPage format: http://user:pass@ip:port
+        co.set_proxy(proxy_url)
+    
+    # 2. Set Arguments for GitHub Actions
+    co.set_argument('--no-sandbox')
+    co.set_argument('--disable-gpu')
+    co.set_argument('--lang=en-US')
+    
+    # 3. Explicitly set browser path for GHA
+    # Standard location on ubuntu-latest
+    co.set_paths(browser_path='/usr/bin/google-chrome')
+
+    # Initialize Page
+    page = ChromiumPage(addr_or_opts=co)
+    
+    try:
+        # --- LOGIN VIA COOKIES ---
+        print(">> Injecting Cookies...")
+        if os.path.exists(COOKIES_FILE):
+            with open(COOKIES_FILE, 'r') as f:
+                cookies = json.load(f)
+                # DrissionPage handles list of dicts easily
+                if isinstance(cookies, dict) and 'cookies' in cookies:
+                    cookies = cookies['cookies']
+                
+                # Convert to DrissionPage format if needed, but it usually accepts list of dicts
+                for cookie in cookies:
+                    page.set.cookies(cookie)
+        else:
+            print(">> WARNING: No cookie file found.")
+
+        # --- NAVIGATE ---
+        print(">> Navigating to NameBio...")
+        page.get("https://namebio.com/")
+        
+        # --- CLOUDFLARE CHECK ---
+        if not bypass_turnstile(page):
+            raise Exception("Could not bypass Cloudflare.")
+
+        # --- DASHBOARD CHECK ---
+        # If we logged in, we might be on /account
+        if "/account" in page.url or "dashboard" in page.url:
+            print(">> Landed on Dashboard. Redirecting to Home...")
+            page.get("https://namebio.com/")
+            time.sleep(5)
+            # Check Cloudflare again after redirect
+            bypass_turnstile(page)
+
+        # --- BANNER HANDLING ---
+        # <div id="nudge-countdown-container"><a data-dismiss="modal">Close</a>
         try:
-            parsed = urlparse(proxy_url)
-            server_address = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-            launch_options["proxy"] = {
-                "server": server_address,
-                "username": parsed.username,
-                "password": parsed.password
-            }
-            print(f">> Proxy Configured: {parsed.hostname}:{parsed.port}")
+            banner = page.ele('#nudge-countdown-container', timeout=2)
+            if banner:
+                close_btn = banner.ele('css:a[data-dismiss="modal"]')
+                if close_btn:
+                    close_btn.click()
+                    print(">> Banner Closed.")
         except:
-             print(">> WARNING: Could not parse proxy URL. Using raw string.")
-             launch_options["proxy"] = {"server": proxy_url}
+            pass
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_options)
+        # --- APPLY FILTERS ---
+        apply_filters(page)
+
+        # --- SEARCH ---
+        print(">> Clicking Search...")
+        page.ele('#search-submit').click()
         
-        context = browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            ignore_https_errors=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        )
+        # Wait for table
+        print(">> Waiting for results...")
+        # Wait until the table has rows. Timeout 60s
+        page.wait.ele_displayed('#search-results tbody tr', timeout=60)
+        time.sleep(3)
+
+        # --- SCRAPE ---
+        rows = page.eles('#search-results tbody tr')
+        data = []
         
-        try:
-            page = context.new_page()
-            
-            # APPLY THE ADVANCED STEALTH
-            apply_advanced_stealth(page)
-
-            # 1. LOGIN & CONNECT
-            load_cookies(context)
-            
-            if not connect_with_retries(page, "https://namebio.com/"):
-                raise Exception("Failed to connect to NameBio.")
-            
-            # 2. HANDLE CLOUDFLARE (ROUND 1)
-            bypass_success = bypass_challenge(page, is_round_2=False)
-            if not bypass_success:
-                page.screenshot(path="debug_block_round1.png", animations="disabled")
-                # Don't crash yet, sometimes we are through even if title is stuck
-            
-            # 3. DASHBOARD REDIRECT LOGIC
-            # If we bypassed by clicking "Member Login", we end up on /account
-            print(f">> Current URL: {page.url}")
-            
-            bad_paths = ["/account", "dashboard", "memberships", "login"]
-            if any(path in page.url for path in bad_paths):
-                print(">> Landed on Dashboard. Using Stepping Stone Navigation...")
-                
-                # STEP 1: Go to "Trends" first (Neutral Page)
-                try:
-                    print(">> Step 1: Visiting Trends...")
-                    page.get_by_text("Trends").first.click()
-                    page.wait_for_load_state("domcontentloaded")
-                    time.sleep(5)
-                except:
-                    print(">> Trends link failed.")
-                
-                # STEP 2: Now go to Home via Logo (Looks natural from Trends)
-                print(">> Step 2: Clicking Logo to return Home...")
-                try:
-                    logo = page.locator(".navbar-brand")
-                    if logo.count() > 0:
-                        logo.click()
-                    else:
-                        page.goto("https://namebio.com/?s=", timeout=90000, wait_until="domcontentloaded")
-                except:
-                     page.goto("https://namebio.com/?s=", timeout=90000, wait_until="domcontentloaded")
-
-                time.sleep(5)
-                print(f">> New URL after redirect: {page.url}")
-                
-                # 4. HANDLE CLOUDFLARE (ROUND 2)
-                # If we are stuck on Captcha again, Run the Hunter Loop
-                if "captcha" in page.url or "robot" in page.title().lower():
-                    print(">> Redirect triggered Cloudflare. Running Round 2 Bypass...")
-                    bypass_success_2 = bypass_challenge(page, is_round_2=True)
-                    
-                    if not bypass_success_2:
-                         # Final Hail Mary: Check if filters exist anyway
-                         if page.locator("button[data-id='extension']").count() > 0:
-                            print(">> Filters detected despite spinner. Proceeding...")
-                         else:
-                            page.screenshot(path="debug_block_round2.png", animations="disabled")
-                            raise Exception("Cloudflare blocked access (Round 2).")
-
-            # 5. HANDLE BANNER
-            try:
-                if page.locator("#nudge-countdown-container").is_visible(timeout=10000):
-                    print(">> Banner detected. Waiting...")
-                    page.locator("#nudge-countdown-container a[data-dismiss='modal']").click(timeout=45000)
-                    print(">> Banner closed.")
-            except:
-                pass
-
-            # 6. APPLY FILTERS
-            print(">> Applying filters...")
-            try:
-                # Wait longer for filters to appear after potential redirect
-                page.wait_for_selector("button[data-id='extension']", state="attached", timeout=60000)
-            except:
-                print(">> ERROR: Filters not found. Taking screenshot...")
-                page.screenshot(path="debug_error_nofilters.png", animations="disabled")
-                raise Exception("Filters did not load.")
-            
-            page.click("button[data-id='extension']")
-            page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('.com')")
-            time.sleep(2)
-
-            page.click("button[data-id='venue']")
-            page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:has-text('GoDaddy')")
-            time.sleep(2)
-
-            page.click("button[data-id='date-range']")
-            page.click("div.dropdown-menu.open ul.dropdown-menu.inner li:nth-child(2) a")
-            time.sleep(2)
-
-            page.select_option("select[name='search-results_length']", "25")
-            
-            # 7. SCRAPE
-            print(">> Clicking Search...")
-            page.click("#search-submit")
-            page.wait_for_selector("#search-results tbody tr", state="visible", timeout=60000)
-            time.sleep(5) 
-
-            rows = page.query_selector_all("#search-results tbody tr")
-            data = []
-            
-            for row in rows:
-                if "No matching records" in row.inner_text(): continue
-                cols = row.query_selector_all("td")
-                if len(cols) < 4: continue
-
-                domain = cols[0].inner_text().strip()
-                price = get_price_via_ocr(cols[1]).replace("USD", "").replace("$", "").strip()
-                date = cols[2].inner_text().strip()
-                venue = cols[3].inner_text().strip()
-                
-                print(f"   Found: {domain} | {price}")
-                data.append([domain, price, date, venue])
-
-            with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Domain", "Price", "Date", "Venue"])
-                writer.writerows(data)
-                
-            print(f">> Success! {len(data)} rows saved.")
-
-        except Exception as e:
-            print(f">> ERROR: {e}")
-            try:
-                page.screenshot(path="debug_crash.png", animations="disabled")
-            except:
-                pass
-            raise e
+        print(f">> Processing {len(rows)} rows...")
         
-        browser.close()
+        for row in rows:
+            if "No matching records" in row.text:
+                continue
+                
+            cols = row.eles('tag:td')
+            if len(cols) < 4: continue
+
+            # Text Extraction
+            domain = cols[0].text.strip()
+            date = cols[2].text.strip()
+            venue = cols[3].text.strip()
+            
+            # OCR for Price
+            # cols[1] contains the image
+            price_raw = get_price_via_ocr(cols[1])
+            price = price_raw.replace("USD", "").replace("$", "").strip()
+
+            print(f"   Found: {domain} | {price}")
+            data.append([domain, price, date, venue])
+
+        # --- SAVE ---
+        with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Domain", "Price", "Date", "Venue"])
+            writer.writerows(data)
+            
+        print(f">> Success! {len(data)} rows saved.")
+
+    except Exception as e:
+        print(f">> ERROR: {e}")
+        page.get_screenshot(path="debug_crash.png")
+        raise e
+    
+    finally:
+        page.quit()
 
 if __name__ == "__main__":
     main()
