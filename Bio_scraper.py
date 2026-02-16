@@ -14,7 +14,6 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # --- CONFIGURATION ---
 COOKIES_FILE = "namebio_session.json"
 OUTPUT_FILE = "namebio_data.csv"
-# We spoof an iPhone 14 Pro
 MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 
 # --- PROXY AUTH EXTENSION (MANIFEST V3) ---
@@ -54,7 +53,9 @@ def create_proxy_auth_extension(proxy_string, plugin_dir="proxy_auth_plugin"):
                 bypassList: ["localhost"]
             }}
         }};
+
         chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+
         chrome.webRequest.onAuthRequired.addListener(
             function(details) {{
                 return {{authCredentials: {{username: "{username}", password: "{password}"}}}};
@@ -82,7 +83,6 @@ def safe_screenshot(page, name):
     except: pass
 
 def is_blocked(page):
-    """Checks for the Hard Block screen."""
     if "blocked" in page.title.lower() or "security service" in page.html.lower():
         print(">> CRITICAL: Firewall Ban Detected.")
         safe_screenshot(page, "debug_ban.png")
@@ -92,31 +92,24 @@ def is_blocked(page):
 def bypass_turnstile(page):
     print(">> Checking Security...")
     time.sleep(3)
-    
     if is_blocked(page): return False
     
-    # If we see the 'robot' title, we fight.
     if "Just a moment" in page.title or "robot" in page.title.lower():
         print(">> Turnstile Challenge Detected. Engaging...")
-        
         for i in range(20):
             if "Just a moment" not in page.title and "robot" not in page.title.lower():
                 print(">> SUCCESS! Security Cleared.")
                 return True
-                
-            # Scan for iframe
+            
             iframe = page.ele('xpath://iframe[starts-with(@src, "https://challenges.cloudflare.com")]', timeout=2)
             if iframe:
                 print(f">> Widget Found. Touching... ({i}s)")
-                # Mobile Emulation uses Touch events naturally
                 try:
-                    iframe.ele('tag:body').click() # Drission handles touch mapping
+                    iframe.ele('tag:body').click() 
                     time.sleep(2)
                 except: pass
             time.sleep(1)
-            
         return False
-        
     print(">> No Challenge Detected.")
     return True
 
@@ -125,45 +118,34 @@ def apply_filters_mobile(page):
     try:
         if is_blocked(page): return False
 
-        # On mobile, the layout might be slightly compressed, but IDs usually stay same.
-        # 1. Extension -> .com
-        # Force a wait for the element to be ready
         ext_btn = page.wait.ele_displayed('css:button[data-id="extension"]', timeout=10)
         if not ext_btn:
-            # If we are on dashboard, go home
             if "/account" in page.url:
                 print(">> Stuck on Dashboard. Redirecting...")
                 page.get("https://namebio.com/last-sold")
                 return False
             raise Exception("Filter UI missing.")
 
-        # Click Extension
         ext_btn.click()
         time.sleep(0.5)
-        # Select .com
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()=".com"]').click()
         print("   -> Extension: .com")
         time.sleep(1)
 
-        # 2. Venue -> GoDaddy
         page.ele('css:button[data-id="venue"]').click()
         time.sleep(0.5)
         page.ele('xpath://div[contains(@class, "open")]//li//span[text()="GoDaddy"]').click()
         print("   -> Venue: GoDaddy")
         time.sleep(1)
 
-        # 3. Date -> Today
         page.ele('css:button[data-id="date-range"]').click()
         time.sleep(0.5)
-        # Grab list of dates
         dates = page.eles('xpath://div[contains(@class, "open")]//ul/li')
         if len(dates) > 1:
             dates[1].click()
             print("   -> Date: Today")
         time.sleep(1)
 
-        # 4. Rows -> 25
-        # Sometimes hidden on mobile, but we try
         try:
             page.ele('css:select[name="search-results_length"]').select('25')
             print("   -> Rows: 25")
@@ -171,63 +153,90 @@ def apply_filters_mobile(page):
             print("   -> Rows: Default")
         
         return True
-
     except Exception as e:
         print(f">> Filter Error: {e}")
         safe_screenshot(page, "debug_filter_fail.png")
         return False
 
 def main():
-    print(">> Starting DropDax Scraper (Operation Mobile Ghost V2)...")
+    print(">> Starting DropDax Scraper (Proxy Gate V3)...")
     
     proxy_url = os.environ.get("PROXY_URL")
+    plugin_path = None
     
-    co = ChromiumOptions()
-    
-    # 1. PROXY SETUP
+    # 1. SETUP PROXY PLUGIN
     if proxy_url:
-        print(">> Generating Auth Plugin...")
-        plugin = create_proxy_auth_extension(proxy_url)
-        if plugin: co.add_extension(plugin)
+        print(">> Generaring Auth Plugin...")
+        plugin_path = create_proxy_auth_extension(proxy_url)
 
-    # 2. MOBILE EMULATION (MANUAL ARGUMENTS)
-    # Replaced 'set_mobile' with manual arguments to fix AttributeError
-    co.set_argument(f'--user-agent={MOBILE_UA}')
-    co.set_argument('--window-size=390,844')
-    co.set_argument('--touch-events=enabled')
+    # 2. BROWSER SETUP LOOP (THE PROXY GATE)
+    # We try up to 3 times to get a clean IP before starting the scrape
+    page = None
+    proxy_working = False
     
-    # 3. STANDARD ARGS
-    co.set_argument('--no-sandbox')
-    co.set_argument('--disable-gpu')
-    co.set_argument('--lang=en-US')
-    co.set_paths(browser_path='/usr/bin/google-chrome')
-    
-    # 4. Initialize
-    page = ChromiumPage(addr_or_opts=co)
+    for attempt in range(1, 4):
+        print(f"\n>> Connection Check (Attempt {attempt}/3)...")
+        
+        co = ChromiumOptions()
+        # Force load the extension
+        if plugin_path: 
+            co.add_extension(plugin_path)
+            # FORCE the flag as well
+            co.set_argument(f'--load-extension={plugin_path}')
+        
+        co.set_argument(f'--user-agent={MOBILE_UA}')
+        co.set_argument('--window-size=390,844')
+        co.set_argument('--touch-events=enabled')
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-gpu')
+        co.set_argument('--lang=en-US')
+        co.set_paths(browser_path='/usr/bin/google-chrome')
+        
+        try:
+            if page: page.quit()
+            page = ChromiumPage(addr_or_opts=co)
+            
+            # CHECK IP
+            page.get("https://api.ipify.org", timeout=15)
+            current_ip = page.ele('tag:body').text.strip()
+            print(f">> Visible IP: {current_ip}")
+            
+            # Simple check for Azure/Microsoft ranges (Starts with 20. or 13. or 40.)
+            # This is a heuristic; GitHub Actions usually uses these ranges.
+            if current_ip.startswith("20.") or current_ip.startswith("172.") or current_ip.startswith("40."):
+                print(">> BAD IP DETECTED (Azure/Datacenter). Retrying...")
+                continue
+            else:
+                print(">> GOOD IP DETECTED (Likely Proxy). Proceeding...")
+                proxy_working = True
+                break
+                
+        except Exception as e:
+            print(f">> Browser Init Failed: {e}")
+            time.sleep(2)
 
+    if not proxy_working:
+        print("\n>> FATAL: Could not establish secure proxy connection. Aborting to protect cookies.")
+        if page: page.quit()
+        sys.exit(1)
+
+    # 3. SCRAPE SEQUENCE
     try:
-        # --- PRE-FLIGHT ---
-        print(">> Diagnostic Check...")
-        page.get("https://api.ipify.org", timeout=20)
-        print(f">> Visible IP: {page.ele('tag:body').text}")
-
-        # --- SESSION HANDLING ---
-        # We start FRESH (No Cookies) to avoid poisoning the new mobile fingerprint with old desktop cookies
-        print(">> Starting Clean Mobile Session...")
-
-        # --- DEEP ENTRY STRATEGY ---
-        # Go to a specific page, not root
+        print(">> Starting Mobile Session...")
         print(">> Infiltrating via Side Door (/last-sold)...")
+        
+        # CLEAR COOKIES for this session to ensure we don't carry 'banned' state
+        try: page.run_cdp('Network.clearBrowserCookies')
+        except: pass
+        
         page.get("https://namebio.com/last-sold")
         
-        # --- SECURITY CHECK ---
         if not bypass_turnstile(page):
             print(">> Retrying with Root URL...")
             page.get("https://namebio.com/")
             if not bypass_turnstile(page):
                 raise Exception("Banned.")
 
-        # --- BANNER CLEARING ---
         try:
             banner = page.ele('#nudge-countdown-container', timeout=2)
             if banner: 
@@ -235,9 +244,7 @@ def main():
                 print(">> Banner Cleared.")
         except: pass
 
-        # --- FILTER & SEARCH ---
         if not apply_filters_mobile(page):
-            # Retry once
             print(">> Retrying Filters...")
             page.refresh()
             time.sleep(3)
@@ -250,7 +257,6 @@ def main():
         print(">> Waiting for Data...")
         page.wait.ele_displayed('#search-results tbody tr', timeout=30)
         
-        # --- SCRAPE ---
         rows = page.eles('#search-results tbody tr')
         data = []
         print(f">> Found {len(rows)} potential rows.")
@@ -268,7 +274,6 @@ def main():
             print(f"   + {domain} | {price}")
             data.append([domain, price, date, venue])
 
-        # --- EXPORT ---
         with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["Domain", "Price", "Date", "Venue"])
@@ -282,7 +287,7 @@ def main():
         sys.exit(1)
     
     finally:
-        page.quit()
+        if page: page.quit()
         if os.path.exists("proxy_auth_plugin"): shutil.rmtree("proxy_auth_plugin", ignore_errors=True)
 
 if __name__ == "__main__":
