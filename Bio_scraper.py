@@ -11,7 +11,7 @@ def main():
     print(">> Starting ScraperAPI (The Heavyweight)...")
 
     # Target URL
-    target_url = "https://namebio.com"
+    target_url = "https://dropcatch.com"
     
     # ScraperAPI Endpoint
     api_url = "http://api.scraperapi.com"
