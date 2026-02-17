@@ -1,49 +1,57 @@
-from curl_cffi import requests # <--- The Magic Library
-from bs4 import BeautifulSoup
+import requests
 import csv
-import time
+import os
+from bs4 import BeautifulSoup
+
+API_TOKEN = os.getenv("SCRAPE_DO_TOKEN")
 
 def main():
-    print(">> Starting NameBio Scrape (The 'Impostor' Method)...")
-    target_url = "https://namebio.com"
+    print(">> Starting Scrape.do (Mobile Mode)...")
 
-    # We use 'impersonate="chrome120"' to mimic a real Chrome browser's handshake.
-    # This often bypasses the "Checking your browser" screen completely.
+    target_url = "https://namebio.com"
+    api_url = "https://api.scrape.do/"
+
+    # 1. THE MOBILE CONFIGURATION
+    params = {
+        "token": API_TOKEN,
+        "url": target_url,
+        # We use render=true to handle the Javascript
+        "render": "true",
+        # We turn OFF 'super' to rely on their data center solvers (often faster)
+        "super": "false",
+        # We wait 20 SECONDS to ensure the Cloudflare redirect finishes
+        "wait": "20000",
+        # We tell Scrape.do to emulate a Mobile device (often easier to bypass)
+        "mobile": "true" 
+    }
+
     try:
-        print(">> Sending request as Chrome 120...")
-        
-        # Notice we use requests.get from curl_cffi, not standard requests
-        response = requests.get(
-            target_url, 
-            impersonate="chrome120", 
-            timeout=30
-        )
+        print(">> Sending request (iPhone Emulation + 20s Wait)...")
+        response = requests.get(api_url, params=params, timeout=60)
 
         if response.status_code == 200:
-            # Check if we still got the captcha redirect
-            if "window.location" in response.text and "captcha" in response.text:
-                print(">> Failed: Still got sent to Captcha Jail.")
-                # We can't solve it, but we know why it failed.
-                exit(1)
-
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # --- PARSING LOGIC (Same as before) ---
-            table = soup.find('table', id='sales-table')
-            if not table:
-                # Backup search
-                for t in soup.find_all('table'):
-                    th = t.find('th')
-                    if th and "Domain" in th.get_text():
-                        table = t
-                        break
-            
-            if not table:
-                print(">> CRITICAL: Table not found. NameBio layout might have changed.")
+            # --- Check if we are still stuck ---
+            if "captcha" in response.text.lower() or "prove you're not a robot" in response.text.lower():
+                print(">> FAILED: Still stuck on Cloudflare Challenge page.")
+                print(f">> Title: {soup.title.string}")
                 exit(1)
 
-            rows = table.find('tbody').find_all('tr')
-            print(f">> Found {len(rows)} sales. Filtering...")
+            # --- PARSE THE TABLE ---
+            # On mobile view, tables sometimes change structure, so we look for ANY table
+            table = None
+            for t in soup.find_all('table'):
+                if "Domain" in t.get_text():
+                    table = t
+                    break
+            
+            if not table:
+                print(">> CRITICAL: No data table found. Layout might be different on mobile.")
+                exit(1)
+
+            rows = table.find_all('tr')
+            print(f">> Found {len(rows)} rows. Filtering...")
 
             filtered_sales = []
             for row in rows:
@@ -65,10 +73,11 @@ def main():
                 writer.writerow(["Domain", "Price", "Date", "Venue"])
                 writer.writerows(filtered_sales)
                 
-            print(f">> SUCCESS! Saved {len(filtered_sales)} GoDaddy .com sales.")
+            print(f">> SUCCESS! Saved {len(filtered_sales)} rows.")
 
         else:
             print(f">> FAILED. Status: {response.status_code}")
+            print(f">> Error: {response.text}")
             exit(1)
 
     except Exception as e:
