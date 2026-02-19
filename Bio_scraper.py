@@ -22,9 +22,9 @@ def main():
     
     formatted_date_string = f"{yesterday.strftime('%B').lower()}-{day}{suffix}-{yesterday.year}"
     
-    # NEW: Construct the dynamic target URL so it runs automatically every day
-    target_url = f"https://namebio.com/blog/daily-market-report-for-{formatted_date_string}/"
-    print(f">> Target URL: {target_url}")
+    # NEW UPDATE: We keep the old generated URL as a fallback, but we will dynamically fetch the REAL URL first.
+    # Guessing URLs is dangerous because WordPress redirects 404 errors to the homepage if there's a typo.
+    guessed_target_url = f"https://namebio.com/blog/daily-market-report-for-{formatted_date_string}/"
     
     api_url = "https://api.scrape.do/"
 
@@ -33,13 +33,53 @@ def main():
     # 2. render=true: Uses a real browser engine to solve the Javascript challenge
     params = {
         "token": API_TOKEN,
-        "url": target_url,
+        "url": guessed_target_url, # NEW UPDATE: Default to guessed, will update dynamically below
         "render": "true",
         "mobile": "true"
     }
 
+    # NEW UPDATE: Step 1 - Fetch the blog index to find the EXACT link to the newest report
     try:
-        print(">> Sending request to Blog URL via Scrape.do...")
+        # blog_index_url = "https://namebio.com/blog/"
+        # NEW UPDATE: Changed to the specific Daily Market Report category page
+        blog_index_url = "https://namebio.com/blog/category/daily-market-report/"
+        print(f">> Step 1: Visiting {blog_index_url} to find the exact latest report URL...")
+        
+        # Clone our Scrape.do settings for this quick index check
+        index_params = params.copy()
+        index_params["url"] = blog_index_url
+        
+        index_response = requests.get(api_url, params=index_params, timeout=120)
+        
+        if index_response.status_code == 200:
+            index_soup = BeautifulSoup(index_response.text, 'html.parser')
+            real_url = None
+            
+            # Find all links on the blog page and grab the first Daily Market Report
+            for a_tag in index_soup.find_all('a', href=True):
+                href = a_tag['href']
+                # NEW UPDATE: Ensure it is a post URL and not a pagination link by excluding the word "category"
+                if "daily-market-report" in href.lower() and "category" not in href.lower():
+                    real_url = href
+                    break
+            
+            if real_url:
+                print(f">> Found exact latest URL: {real_url}")
+                params["url"] = real_url # Update params with the real URL
+            else:
+                print(">> Warning: Could not find dynamic URL. Falling back to guessed URL.")
+                print(f">> Target URL: {guessed_target_url}")
+                
+        else:
+            print(">> Warning: Failed to load blog index. Falling back to guessed URL.")
+            print(f">> Target URL: {guessed_target_url}")
+
+    except Exception as e:
+        print(f">> Error in Step 1: {e}. Falling back to guessed URL.")
+
+    # --- Start Step 2: Actually Scrape the Found Page ---
+    try:
+        print(">> Step 2: Sending request to the Target URL via Scrape.do...")
         response = requests.get(api_url, params=params, timeout=120)
 
         if response.status_code == 200:
@@ -82,7 +122,13 @@ def main():
                 if len(cols) >= 4:
                     date_sold = cols[3].get_text(strip=True)
 
-                # NEW UPDATE: Allow ALL extensions and ALL venues EXCEPT "DropCatch".
+                # NEW UPDATE: Expanding the venue filter to capture GoDaddy, Afternic, and Sedo sales instead of just GoDaddy
+                # target_venues = ["godaddy", "afternic", "sedo"] 
+                # NEW UPDATE: Commented out target_venues as requested, since we now capture all venues.
+                
+                # NEW: Check if it is a .com and belongs to any of our target venues
+                # if ".com" in domain.lower() and any(v in venue.lower() for v in target_venues):
+                # NEW UPDATE: Replaced the specific filter to allow ALL extensions and ALL venues EXCEPT "DropCatch".
                 if "dropcatch" not in venue.lower():
                     
                     # NEW UPDATE: Prepare new variables strictly for WordPress format compatibility
