@@ -5,6 +5,10 @@ on:
     - cron: '0 9 * * *'
   workflow_dispatch:
 
+# NEW: We explicitly give the bot permission to push the CSV file back to the repo
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,7 +21,6 @@ jobs:
         with:
           python-version: '3.9'
 
-      # FIX: Install 'requests' and 'beautifulsoup4'
       - name: Install dependencies
         run: |
           pip install requests beautifulsoup4
