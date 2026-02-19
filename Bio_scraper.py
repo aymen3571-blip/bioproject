@@ -73,19 +73,16 @@ def main():
                 price = cols[1].get_text(strip=True)
                 venue = cols[2].get_text(strip=True) 
                 
+                # NEW UPDATE: Clean the price by removing the dollar sign and commas so it matches WordPress format.
+                price = price.replace("$", "").replace(",", "")
+
                 # Automatically apply yesterday's exact date string to the records
                 date_sold = yesterday.strftime("%Y-%m-%d")
                 
                 if len(cols) >= 4:
                     date_sold = cols[3].get_text(strip=True)
 
-                # NEW: Expanding the venue filter to capture GoDaddy, Afternic, and Sedo sales instead of just GoDaddy
-                # target_venues = ["godaddy", "afternic", "sedo"] 
-                # NEW UPDATE: Commented out target_venues as requested, since we now capture all venues.
-                
-                # NEW: Check if it is a .com and belongs to any of our target venues
-                # if ".com" in domain.lower() and any(v in venue.lower() for v in target_venues):
-                # NEW UPDATE: Replaced the specific filter to allow ALL extensions and ALL venues EXCEPT "DropCatch".
+                # NEW UPDATE: Allow ALL extensions and ALL venues EXCEPT "DropCatch".
                 if "dropcatch" not in venue.lower():
                     
                     # NEW UPDATE: Prepare new variables strictly for WordPress format compatibility
@@ -93,21 +90,19 @@ def main():
                     bids = "0"
                     platform = venue
 
-                    # filtered_sales.append([domain, price, date_sold, venue])
                     # NEW UPDATE: Changed appended list to strictly follow Domain,Price,Status,Date,Bids,Platform order.
                     filtered_sales.append([domain, price, status, date_sold, bids, platform])
 
             # Save to CSV
             filename = "daily_sales.csv"
             
-            # Logic to append or create new
-            file_exists = os.path.isfile(filename)
-            with open(filename, "a" if file_exists else "w", newline="", encoding="utf-8") as f:
+            # NEW UPDATE: Changed the file mode from "a" (append) to "w" (overwrite). 
+            # This ensures that old data doesn't mix with new data. It writes a fresh file every time.
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                if not file_exists:
-                    # writer.writerow(["Domain", "Price", "Date", "Venue"])
-                    # NEW UPDATE: Wrote exact headers to match the target WordPress script structure.
-                    writer.writerow(["Domain", "Price", "Status", "Date", "Bids", "Platform"])
+                
+                # NEW UPDATE: Since we overwrite every time, we ALWAYS write the exact headers first.
+                writer.writerow(["Domain", "Price", "Status", "Date", "Bids", "Platform"])
                 writer.writerows(filtered_sales)
                 
             print(f">> SAVED {len(filtered_sales)} rows to {filename}")
