@@ -26,7 +26,9 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: Run Scraper
-        # NEW: Removed the SCRAPE_DO_TOKEN environment variable entirely since we are going direct
+        # NEW: Re-added the SCRAPE_DO_TOKEN variable since we need Scrape.do again
+        env:
+          SCRAPE_DO_TOKEN: ${{ secrets.SCRAPE_DO_TOKEN }}
         run: python Bio_scraper.py
 
       - name: Commit and Push CSV
