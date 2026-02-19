@@ -5,7 +5,7 @@ on:
     - cron: '0 9 * * *'
   workflow_dispatch:
 
-# NEW: We explicitly give the bot permission to push the CSV file back to the repo
+# We explicitly give the bot permission to push the CSV file back to the repo
 permissions:
   contents: write
 
@@ -26,8 +26,7 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: Run Scraper
-        env:
-          SCRAPE_DO_TOKEN: ${{ secrets.SCRAPE_DO_TOKEN }}
+        # NEW: Removed the SCRAPE_DO_TOKEN environment variable entirely since we are going direct
         run: python Bio_scraper.py
 
       - name: Commit and Push CSV
