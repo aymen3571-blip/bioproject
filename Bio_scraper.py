@@ -5,40 +5,30 @@ import time
 from bs4 import BeautifulSoup
 from datetime import date
 
-API_TOKEN = os.getenv("SCRAPE_DO_TOKEN")
-
 def main():
-    print(">> Starting Scrape.do (Targeting Blog Page)...")
+    print(">> Starting Direct Scrape (Targeting Blog Page without Scrape.do)...")
 
-    # NEW: We target the specific blog post URL instead of the main search database page
     target_url = "https://namebio.com/blog/daily-market-report-for-february-17th-2026/"
-    api_url = "https://api.scrape.do/"
-
-    # THE STRATEGY:
-    # 1. mobile=true: Tells Cloudflare we are a phone (touchscreen, battery, etc.)
-    # 2. render=true: Uses a real browser engine to solve the Javascript challenge
-    # NEW: We removed the extreme 25-second wait to see if the blog loads instantly without a challenge.
-    params = {
-        "token": API_TOKEN,
-        "url": target_url,
-        "render": "true",
-        "mobile": "true"
+    
+    # NEW: We must provide a User-Agent when accessing directly. 
+    # Without this, Python's default "requests" user-agent gets blocked instantly by even the weakest firewalls.
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        print(">> Sending request to Blog URL...")
-        response = requests.get(api_url, params=params, timeout=120)
+        print(">> Sending direct GET request from GitHub IP...")
+        # NEW: Sending request directly to target_url with headers, completely removing Scrape.do routing
+        response = requests.get(target_url, headers=headers, timeout=60)
 
         if response.status_code == 200:
-            # Check if we are still in the "Waiting Room"
             if "Just a moment" in response.text or "security check" in response.text:
-                print(">> FAILED: Cloudflare detected us on the blog page as well.")
+                print(">> FAILED: Cloudflare blocked the direct GitHub IP.")
                 exit(1)
 
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # --- PARSING ---
-            # NEW: Blog posts often use standard WordPress HTML tables, so we look for any table with "Domain" or "Price"
+            # Blog posts often use standard WordPress HTML tables, so we look for any table with "Domain" or "Price"
             table = None
             for t in soup.find_all('table'):
                 if "Domain" in t.get_text() or "Price" in t.get_text():
@@ -46,26 +36,26 @@ def main():
                     break
             
             if not table:
-                print(">> CRITICAL: Cloudflare let us in, but I can't find the table.")
+                print(">> CRITICAL: Page loaded, but I can't find the table.")
                 print(f">> Page Title: {soup.title.string if soup.title else 'No Title'}")
                 exit(1)
 
-            # NEW: Handle tables that might or might not have a <tbody> tag (common in blogs)
+            # Handle tables that might or might not have a <tbody> tag (common in blogs)
             rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-            print(f">> SUCCESS! Cloudflare bypassed. Found {len(rows)} rows in the blog table.")
+            print(f">> SUCCESS! Cloudflare bypassed directly. Found {len(rows)} rows in the blog table.")
 
             filtered_sales = []
             for row in rows:
-                # NEW: Blog tables sometimes use <th> for the first column instead of <td>, so we find both
+                # Blog tables sometimes use <th> for the first column instead of <td>, so we find both
                 cols = row.find_all(['td', 'th']) 
-                if len(cols) < 3: continue # NEW: Blog tables might only have 3 columns (Domain, Price, Venue)
+                if len(cols) < 3: continue # Blog tables might only have 3 columns (Domain, Price, Venue)
                 
                 domain = cols[0].get_text(strip=True)
                 price = cols[1].get_text(strip=True)
                 
-                # NEW: Extract venue. If Date is missing in the blog table, we handle it gracefully.
+                # Extract venue. If Date is missing in the blog table, we handle it gracefully.
                 venue = cols[2].get_text(strip=True) 
-                date_sold = "2026-02-17" # NEW: Hardcoded date based on the URL for this specific test
+                date_sold = "2026-02-17" # Hardcoded date based on the URL for this specific test
                 
                 if len(cols) >= 4:
                     date_sold = cols[3].get_text(strip=True)
