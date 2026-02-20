@@ -10,12 +10,12 @@ API_TOKEN = os.getenv("SCRAPE_DO_TOKEN")
 # NEW UPDATE: Exceptional override variables for manual backup runs or historical data retrieval.
 # Leave MANUAL_URL empty ("") for normal automated daily runs.
 # If you enter a URL here, the script will skip the category search and scrape this exact link instead.
-MANUAL_URL = "https://namebio.com/blog/daily-market-report-for-february-17th-2026/" # Example: "https://namebio.com/blog/daily-market-report-for-february-10th-2026/"
+MANUAL_URL = "https://namebio.com/blog/daily-market-report-for-february-16th-2026/" # Example: "https://namebio.com/blog/daily-market-report-for-february-10th-2026/"
 
 # NEW UPDATE: If using MANUAL_URL for an old post, enter the exact date here (Format: "YYYY-MM-DD").
 # This ensures the CSV records the correct past date instead of "yesterday's" date.
 # If left empty, the script will default to "yesterday".
-MANUAL_DATE = "2026-02-17" # Example: "2026-02-10"
+MANUAL_DATE = "2026-02-16" # Example: "2026-02-10"
 
 def main():
     print(">> Starting Scrape.do (Targeting Blog Page)...")
