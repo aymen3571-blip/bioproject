@@ -1,4 +1,4 @@
-name: Daily NameBio Blog Scrape
+name: Daily Bio Blog Scrape
 
 on:
   schedule:
