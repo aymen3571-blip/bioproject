@@ -7,14 +7,29 @@ from datetime import date, timedelta # NEW: Added timedelta to calculate yesterd
 
 API_TOKEN = os.getenv("SCRAPE_DO_TOKEN")
 
+# NEW UPDATE: Exceptional override variables for manual backup runs or historical data retrieval.
+# Leave MANUAL_URL empty ("") for normal automated daily runs.
+# If you enter a URL here, the script will skip the category search and scrape this exact link instead.
+MANUAL_URL = "" # Example: "https://namebio.com/blog/daily-market-report-for-february-10th-2026/"
+
+# NEW UPDATE: If using MANUAL_URL for an old post, enter the exact date here (Format: "YYYY-MM-DD").
+# This ensures the CSV records the correct past date instead of "yesterday's" date.
+# If left empty, the script will default to "yesterday".
+MANUAL_DATE = "" # Example: "2026-02-10"
+
 def main():
     print(">> Starting Scrape.do (Targeting Blog Page)...")
 
     # NEW: Calculate yesterday's date to dynamically build the URL (and use for the CSV data)
     yesterday = date.today() - timedelta(days=1)
     
-    # NEW: Added detailed log to show the calculated date
-    print(f">> [LOG] Calculated target date for data injection: {yesterday.strftime('%Y-%m-%d')}")
+    # NEW UPDATE: Determine which date to inject into the CSV based on the manual override
+    if MANUAL_DATE:
+        target_date_string = MANUAL_DATE
+        print(f">> [LOG] MANUAL_DATE override active. Using date: {target_date_string}")
+    else:
+        target_date_string = yesterday.strftime("%Y-%m-%d")
+        print(f">> [LOG] Calculated target date for data injection: {target_date_string}")
     
     api_url = "https://api.scrape.do/"
 
@@ -27,48 +42,54 @@ def main():
         "mobile": "true"
     }
 
-    # NEW UPDATE: Step 1 - Fetch the blog index to find the EXACT link to the newest report
-    try:
-        # NEW UPDATE: Changed to the specific Daily Market Report category page
-        blog_index_url = "https://namebio.com/blog/category/daily-market-report/"
-        print(f">> [LOG] Step 1 Initiated: Requesting category index page at {blog_index_url}")
-        
-        # Clone our Scrape.do settings for this quick index check
-        index_params = params.copy()
-        index_params["url"] = blog_index_url
-        
-        print(">> [LOG] Waiting for Scrape.do to bypass Cloudflare on the index page...")
-        index_response = requests.get(api_url, params=index_params, timeout=120)
-        
-        if index_response.status_code == 200:
-            print(">> [LOG] Index page loaded successfully. Parsing HTML to locate the newest post link...")
-            index_soup = BeautifulSoup(index_response.text, 'html.parser')
-            real_url = None
+    # NEW UPDATE: Check if we are doing a manual backup run or an automated run
+    if MANUAL_URL:
+        print(f">> [LOG] MANUAL_URL override active! Skipping Step 1 (Index Search).")
+        print(f">> [LOG] Directing scraper exactly to: {MANUAL_URL}")
+        params["url"] = MANUAL_URL
+    else:
+        # --- Start Step 1: Fetch the blog index to find the EXACT link to the newest report ---
+        try:
+            # NEW UPDATE: Changed to the specific Daily Market Report category page
+            blog_index_url = "https://namebio.com/blog/category/daily-market-report/"
+            print(f">> [LOG] Step 1 Initiated: Requesting category index page at {blog_index_url}")
             
-            # Find all links on the blog page and grab the first Daily Market Report
-            for a_tag in index_soup.find_all('a', href=True):
-                href = a_tag['href']
-                # NEW UPDATE: Ensure it is a post URL and not a pagination link by excluding the word "category"
-                if "daily-market-report" in href.lower() and "category" not in href.lower():
-                    real_url = href
-                    print(f">> [LOG] Valid post link successfully extracted: {real_url}")
-                    break
+            # Clone our Scrape.do settings for this quick index check
+            index_params = params.copy()
+            index_params["url"] = blog_index_url
             
-            if real_url:
-                print(f">> Found exact latest URL: {real_url}")
-                params["url"] = real_url # Update params with the real URL
-            else:
-                # NEW: Hard exit if the URL cannot be found, since we removed the guessing fallback
-                print(">> [LOG] CRITICAL: Could not find any valid report link on the index page.")
-                exit(1)
+            print(">> [LOG] Waiting for Scrape.do to bypass Cloudflare on the index page...")
+            index_response = requests.get(api_url, params=index_params, timeout=120)
+            
+            if index_response.status_code == 200:
+                print(">> [LOG] Index page loaded successfully. Parsing HTML to locate the newest post link...")
+                index_soup = BeautifulSoup(index_response.text, 'html.parser')
+                real_url = None
                 
-        else:
-            print(f">> [LOG] CRITICAL: Failed to load blog index. Status Code: {index_response.status_code}")
-            exit(1)
+                # Find all links on the blog page and grab the first Daily Market Report
+                for a_tag in index_soup.find_all('a', href=True):
+                    href = a_tag['href']
+                    # NEW UPDATE: Ensure it is a post URL and not a pagination link by excluding the word "category"
+                    if "daily-market-report" in href.lower() and "category" not in href.lower():
+                        real_url = href
+                        print(f">> [LOG] Valid post link successfully extracted: {real_url}")
+                        break
+                
+                if real_url:
+                    print(f">> Found exact latest URL: {real_url}")
+                    params["url"] = real_url # Update params with the real URL
+                else:
+                    # NEW: Hard exit if the URL cannot be found, since we removed the guessing fallback
+                    print(">> [LOG] CRITICAL: Could not find any valid report link on the index page.")
+                    exit(1)
+                    
+            else:
+                print(f">> [LOG] CRITICAL: Failed to load blog index. Status Code: {index_response.status_code}")
+                exit(1)
 
-    except Exception as e:
-        print(f">> [LOG] CRITICAL ERROR in Step 1: {e}")
-        exit(1)
+        except Exception as e:
+            print(f">> [LOG] CRITICAL ERROR in Step 1: {e}")
+            exit(1)
 
     # --- Start Step 2: Actually Scrape the Found Page ---
     try:
@@ -111,8 +132,8 @@ def main():
                 # NEW UPDATE: Clean the price by removing the dollar sign and commas so it matches WordPress format.
                 price = price.replace("$", "").replace(",", "")
 
-                # Automatically apply yesterday's exact date string to the records
-                date_sold = yesterday.strftime("%Y-%m-%d")
+                # NEW UPDATE: Automatically apply the target date string to the records
+                date_sold = target_date_string
                 
                 if len(cols) >= 4:
                     date_sold = cols[3].get_text(strip=True)
