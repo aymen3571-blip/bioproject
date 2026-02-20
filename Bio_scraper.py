@@ -39,7 +39,7 @@ def main():
     params = {
         "token": API_TOKEN,
         "render": "true",
-        "mobile": "true"
+        
     }
 
     # NEW UPDATE: Check if we are doing a manual backup run or an automated run
