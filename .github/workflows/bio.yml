@@ -1,9 +1,7 @@
 name: Daily Bio Blog Scrape
 
 on:
-  schedule:
-    - cron: '0 9 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Triggered by cron-job.org Or Allows you to run it manually
 
 # We explicitly give the bot permission to push the CSV file back to the repo
 permissions:
