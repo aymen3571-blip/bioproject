@@ -15,7 +15,7 @@ MANUAL_URL = "" # Example: "https://namebio.com/blog/daily-market-report-for-feb
 # NEW UPDATE: If using MANUAL_URL for an old post, enter the exact date here (Format: "YYYY-MM-DD").
 # This ensures the CSV records the correct past date instead of "yesterday's" date.
 # If left empty, the script will default to "yesterday".
-MANUAL_DATE = "" # Example: "2026-02-10"
+MANUAL_DATE = "2026-02-19" # Example: "2026-02-10"
 
 def main():
     print(">> Starting Scrape.do (Targeting Blog Page)...")
