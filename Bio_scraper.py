@@ -92,94 +92,120 @@ def main():
             exit(1)
 
     # --- Start Step 2: Actually Scrape the Found Page ---
-    try:
-        print(f">> [LOG] Step 2 Initiated: Requesting the exact post URL: {params['url']}")
-        response = requests.get(api_url, params=params, timeout=120)
+    # NEW UPDATE: Added a retry loop to combat the "Proxy Roulette".
+    # We will try up to 3 times to get a clean IP from Scrape.do.
+    MAX_RETRIES = 3
+    scrape_successful = False
 
-        if response.status_code == 200:
-            print(">> [LOG] Post page loaded successfully. Checking for Cloudflare interference...")
-            # Check if we are still in the "Waiting Room"
-            if "Just a moment" in response.text or "security check" in response.text:
-                print(">> FAILED: Cloudflare detected us on the blog page as well.")
-                exit(1)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            # NEW UPDATE: Added the attempt counter to the log
+            print(f">> [LOG] Step 2 Initiated (Attempt {attempt}/{MAX_RETRIES}): Requesting the exact post URL: {params['url']}")
+            response = requests.get(api_url, params=params, timeout=120)
 
-            print(">> [LOG] No Cloudflare blocks detected. Proceeding to parse tables...")
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # --- PARSING ---
-            # NEW: We now specifically target the main "All Sales Results $500+" table by its exact ID
-            table = soup.find('table', id='daily-results')
-            
-            if not table:
-                print(">> CRITICAL: Cloudflare let us in, but I can't find the 'daily-results' table.")
-                print(f">> Page Title: {soup.title.string if soup.title else 'No Title'}")
-                exit(1)
+            if response.status_code == 200:
+                print(">> [LOG] Post page loaded successfully. Checking for Cloudflare interference...")
+                # Check if we are still in the "Waiting Room"
+                if "Just a moment" in response.text or "security check" in response.text:
+                    # NEW UPDATE: Instead of crashing, we warn and trigger a retry
+                    print(">> WARNING: Cloudflare detected us on the blog page.")
+                    print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                    time.sleep(3)
+                    continue
 
-            # Handle tables that might or might not have a <tbody> tag (common in blogs)
-            rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-            print(f">> SUCCESS! Found {len(rows)} rows in the main daily-results table. Beginning data extraction...")
-
-            filtered_sales = []
-            for row in rows:
-                # Blog tables sometimes use <th> for the first column instead of <td>, so we find both
-                cols = row.find_all(['td', 'th']) 
-                if len(cols) < 3: continue 
+                print(">> [LOG] No Cloudflare blocks detected. Proceeding to parse tables...")
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
-                domain = cols[0].get_text(strip=True)
-                price = cols[1].get_text(strip=True)
-                venue = cols[2].get_text(strip=True) 
+                # --- PARSING ---
+                # NEW: We now specifically target the main "All Sales Results $500+" table by its exact ID
+                table = soup.find('table', id='daily-results')
                 
-                # NEW UPDATE: Clean the price by removing the dollar sign and commas so it matches WordPress format.
-                price = price.replace("$", "").replace(",", "")
+                if not table:
+                    # NEW UPDATE: Silent redirects to the homepage hide the table. We warn and retry.
+                    print(">> WARNING: Cloudflare let us in, but I can't find the 'daily-results' table. Likely a silent redirect.")
+                    print(f">> Page Title: {soup.title.string if soup.title else 'No Title'}")
+                    print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                    time.sleep(3)
+                    continue
 
-                # NEW UPDATE: Automatically apply the target date string to the records
-                date_sold = target_date_string
-                
-                if len(cols) >= 4:
-                    date_sold = cols[3].get_text(strip=True)
+                # Handle tables that might or might not have a <tbody> tag (common in blogs)
+                rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
+                print(f">> SUCCESS! Found {len(rows)} rows in the main daily-results table. Beginning data extraction...")
 
-                # NEW UPDATE: Expanding the venue filter to capture GoDaddy, Afternic, and Sedo sales instead of just GoDaddy
-                # target_venues = ["godaddy", "afternic", "sedo"] 
-                # NEW UPDATE: Commented out target_venues as requested, since we now capture all venues.
-                
-                # NEW: Check if it is a .com and belongs to any of our target venues
-                # if ".com" in domain.lower() and any(v in venue.lower() for v in target_venues):
-                # NEW UPDATE: Replaced the specific filter to allow ALL extensions and ALL venues EXCEPT "DropCatch".
-                if "dropcatch" not in venue.lower():
+                filtered_sales = []
+                for row in rows:
+                    # Blog tables sometimes use <th> for the first column instead of <td>, so we find both
+                    cols = row.find_all(['td', 'th']) 
+                    if len(cols) < 3: continue 
                     
-                    # NEW UPDATE: Prepare new variables strictly for WordPress format compatibility
-                    status = "SOLD"
-                    bids = "0"
-                    platform = venue
+                    domain = cols[0].get_text(strip=True)
+                    price = cols[1].get_text(strip=True)
+                    venue = cols[2].get_text(strip=True) 
+                    
+                    # NEW UPDATE: Clean the price by removing the dollar sign and commas so it matches WordPress format.
+                    price = price.replace("$", "").replace(",", "")
 
-                    # NEW UPDATE: Changed appended list to strictly follow Domain,Price,Status,Date,Bids,Platform order.
-                    filtered_sales.append([domain, price, status, date_sold, bids, platform])
+                    # NEW UPDATE: Automatically apply the target date string to the records
+                    date_sold = target_date_string
+                    
+                    if len(cols) >= 4:
+                        date_sold = cols[3].get_text(strip=True)
 
-            print(f">> [LOG] Data extraction complete. Total valid records prepared for export: {len(filtered_sales)}")
+                    # NEW UPDATE: Expanding the venue filter to capture GoDaddy, Afternic, and Sedo sales instead of just GoDaddy
+                    # target_venues = ["godaddy", "afternic", "sedo"] 
+                    # NEW UPDATE: Commented out target_venues as requested, since we now capture all venues.
+                    
+                    # NEW: Check if it is a .com and belongs to any of our target venues
+                    # if ".com" in domain.lower() and any(v in venue.lower() for v in target_venues):
+                    # NEW UPDATE: Replaced the specific filter to allow ALL extensions and ALL venues EXCEPT "DropCatch".
+                    if "dropcatch" not in venue.lower():
+                        
+                        # NEW UPDATE: Prepare new variables strictly for WordPress format compatibility
+                        status = "SOLD"
+                        bids = "0"
+                        platform = venue
 
-            # Save to CSV
-            filename = "daily_sales.csv"
-            print(f">> [LOG] Opening file {filename} in overwrite mode to ensure clean data...")
-            
-            # NEW UPDATE: Changed the file mode from "a" (append) to "w" (overwrite). 
-            # This ensures that old data doesn't mix with new data. It writes a fresh file every time.
-            with open(filename, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
+                        # NEW UPDATE: Changed appended list to strictly follow Domain,Price,Status,Date,Bids,Platform order.
+                        filtered_sales.append([domain, price, status, date_sold, bids, platform])
+
+                print(f">> [LOG] Data extraction complete. Total valid records prepared for export: {len(filtered_sales)}")
+
+                # Save to CSV
+                filename = "daily_sales.csv"
+                print(f">> [LOG] Opening file {filename} in overwrite mode to ensure clean data...")
                 
-                # NEW UPDATE: Since we overwrite every time, we ALWAYS write the exact headers first.
-                writer.writerow(["Domain", "Price", "Status", "Date", "Bids", "Platform"])
-                writer.writerows(filtered_sales)
+                # NEW UPDATE: Changed the file mode from "a" (append) to "w" (overwrite). 
+                # This ensures that old data doesn't mix with new data. It writes a fresh file every time.
+                with open(filename, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    
+                    # NEW UPDATE: Since we overwrite every time, we ALWAYS write the exact headers first.
+                    writer.writerow(["Domain", "Price", "Status", "Date", "Bids", "Platform"])
+                    writer.writerows(filtered_sales)
+                    
+                print(f">> SAVED {len(filtered_sales)} rows to {filename}")
+                print(">> [LOG] Data successfully written to disk. Run completed successfully.")
                 
-            print(f">> SAVED {len(filtered_sales)} rows to {filename}")
-            print(">> [LOG] Data successfully written to disk. Run completed successfully.")
+                # NEW UPDATE: Mark the run as successful and break out of the retry loop
+                scrape_successful = True
+                break
 
-        else:
-            print(f">> API FAILED. Status: {response.status_code}")
-            print(f">> Error: {response.text}")
-            exit(1)
+            else:
+                print(f">> API FAILED. Status: {response.status_code}")
+                print(f">> Error: {response.text}")
+                print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                time.sleep(3)
+                continue
 
-    except Exception as e:
-        print(f">> ERROR: {e}")
+        except Exception as e:
+            print(f">> ERROR on attempt {attempt}: {e}")
+            print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+            time.sleep(3)
+            continue
+
+    # NEW UPDATE: If all 3 attempts fail, we finally let the script crash.
+    if not scrape_successful:
+        print(">> [LOG] CRITICAL: All 3 attempts failed due to Cloudflare blocks or API errors. Exiting.")
         exit(1)
 
 if __name__ == "__main__":
