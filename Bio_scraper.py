@@ -42,6 +42,9 @@ def main():
         
     }
 
+    # NEW UPDATE: Defined MAX_RETRIES globally so both Step 1 and Step 2 can use it for the proxy roulette.
+    MAX_RETRIES = 3
+
     # NEW UPDATE: Check if we are doing a manual backup run or an automated run
     if MANUAL_URL:
         print(f">> [LOG] MANUAL_URL override active! Skipping Step 1 (Index Search).")
@@ -49,52 +52,81 @@ def main():
         params["url"] = MANUAL_URL
     else:
         # --- Start Step 1: Fetch the blog index to find the EXACT link to the newest report ---
-        try:
-            # NEW UPDATE: Changed to the specific Daily Market Report category page
-            blog_index_url = "https://namebio.com/blog/category/daily-market-report/"
-            print(f">> [LOG] Step 1 Initiated: Requesting category index page at {blog_index_url}")
-            
-            # Clone our Scrape.do settings for this quick index check
-            index_params = params.copy()
-            index_params["url"] = blog_index_url
-            
-            print(">> [LOG] Waiting for Scrape.do to bypass Cloudflare on the index page...")
-            index_response = requests.get(api_url, params=index_params, timeout=120)
-            
-            if index_response.status_code == 200:
-                print(">> [LOG] Index page loaded successfully. Parsing HTML to locate the newest post link...")
-                index_soup = BeautifulSoup(index_response.text, 'html.parser')
-                real_url = None
+        # NEW UPDATE: Added a retry loop to combat the "Phantom 200" Cloudflare WAF block on the index page.
+        index_successful = False
+        
+        for index_attempt in range(1, MAX_RETRIES + 1):
+            try:
+                # NEW UPDATE: Changed to the specific Daily Market Report category page
+                blog_index_url = "https://namebio.com/blog/category/daily-market-report/"
+                # NEW UPDATE: Added the attempt counter to the log
+                print(f">> [LOG] Step 1 Initiated (Attempt {index_attempt}/{MAX_RETRIES}): Requesting category index page at {blog_index_url}")
                 
-                # Find all links on the blog page and grab the first Daily Market Report
-                for a_tag in index_soup.find_all('a', href=True):
-                    href = a_tag['href']
-                    # NEW UPDATE: Ensure it is a post URL and not a pagination link by excluding the word "category"
-                    if "daily-market-report" in href.lower() and "category" not in href.lower():
-                        real_url = href
-                        print(f">> [LOG] Valid post link successfully extracted: {real_url}")
-                        break
+                # Clone our Scrape.do settings for this quick index check
+                index_params = params.copy()
+                index_params["url"] = blog_index_url
                 
-                if real_url:
-                    print(f">> Found exact latest URL: {real_url}")
-                    params["url"] = real_url # Update params with the real URL
-                else:
-                    # NEW: Hard exit if the URL cannot be found, since we removed the guessing fallback
-                    print(">> [LOG] CRITICAL: Could not find any valid report link on the index page.")
-                    exit(1)
-                    
-            else:
-                print(f">> [LOG] CRITICAL: Failed to load blog index. Status Code: {index_response.status_code}")
-                exit(1)
+                print(">> [LOG] Waiting for Scrape.do to bypass Cloudflare on the index page...")
+                index_response = requests.get(api_url, params=index_params, timeout=120)
+                
+                if index_response.status_code == 200:
+                    # NEW UPDATE: Check for Cloudflare's invisible waiting room (Phantom 200 OK)
+                    if "Just a moment" in index_response.text or "security check" in index_response.text:
+                        print(">> WARNING: Cloudflare detected us on the index page (Phantom 200).")
+                        print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                        time.sleep(3)
+                        continue
 
-        except Exception as e:
-            print(f">> [LOG] CRITICAL ERROR in Step 1: {e}")
+                    print(">> [LOG] Index page loaded successfully without WAF blocks. Parsing HTML to locate the newest post link...")
+                    index_soup = BeautifulSoup(index_response.text, 'html.parser')
+                    real_url = None
+                    
+                    # Find all links on the blog page and grab the first Daily Market Report
+                    for a_tag in index_soup.find_all('a', href=True):
+                        href = a_tag['href']
+                        # NEW UPDATE: Ensure it is a post URL and not a pagination link by excluding the word "category"
+                        if "daily-market-report" in href.lower() and "category" not in href.lower():
+                            real_url = href
+                            print(f">> [LOG] Valid post link successfully extracted: {real_url}")
+                            break
+                    
+                    if real_url:
+                        print(f">> Found exact latest URL: {real_url}")
+                        params["url"] = real_url # Update params with the real URL
+                        # NEW UPDATE: Mark Step 1 as successful and break out of the retry loop
+                        index_successful = True
+                        break 
+                    else:
+                        # NEW: Hard exit if the URL cannot be found, since we removed the guessing fallback
+                        # NEW UPDATE: Instead of a hard crash, we warn and trigger a proxy retry. 
+                        # Cloudflare Captchas hide all legitimate links.
+                        print(">> WARNING: [LOG] CRITICAL: Could not find any valid report link on the index page. Possible Captcha page masking.")
+                        print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                        time.sleep(3)
+                        continue
+                        
+                else:
+                    # NEW UPDATE: If we get a real error code (like 403 or 500), we retry.
+                    print(f">> WARNING: [LOG] CRITICAL: Failed to load blog index. Status Code: {index_response.status_code}")
+                    print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                    time.sleep(3)
+                    continue
+
+            except Exception as e:
+                # NEW UPDATE: Catch connection timeouts and trigger a retry instead of crashing.
+                print(f">> WARNING: [LOG] CRITICAL ERROR in Step 1 (Attempt {index_attempt}): {e}")
+                print(">> [LOG] Spinning the proxy roulette wheel again in 3 seconds...")
+                time.sleep(3)
+                continue
+                
+        # NEW UPDATE: If all 3 attempts fail for Step 1, we finally let the script crash safely.
+        if not index_successful:
+            print(">> [LOG] CRITICAL: All 3 attempts failed to locate the index link due to WAF blocks or errors. Exiting.")
             exit(1)
 
     # --- Start Step 2: Actually Scrape the Found Page ---
     # NEW UPDATE: Added a retry loop to combat the "Proxy Roulette".
     # We will try up to 3 times to get a clean IP from Scrape.do.
-    MAX_RETRIES = 3
     scrape_successful = False
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -151,12 +183,6 @@ def main():
                     if len(cols) >= 4:
                         date_sold = cols[3].get_text(strip=True)
 
-                    # NEW UPDATE: Expanding the venue filter to capture GoDaddy, Afternic, and Sedo sales instead of just GoDaddy
-                    # target_venues = ["godaddy", "afternic", "sedo"] 
-                    # NEW UPDATE: Commented out target_venues as requested, since we now capture all venues.
-                    
-                    # NEW: Check if it is a .com and belongs to any of our target venues
-                    # if ".com" in domain.lower() and any(v in venue.lower() for v in target_venues):
                     # NEW UPDATE: Replaced the specific filter to allow ALL extensions and ALL venues EXCEPT "DropCatch".
                     if "dropcatch" not in venue.lower():
                         
